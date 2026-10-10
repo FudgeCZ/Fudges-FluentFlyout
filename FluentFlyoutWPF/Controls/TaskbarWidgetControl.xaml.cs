@@ -193,6 +193,11 @@ public partial class TaskbarWidgetControl : UserControl
         PlayPauseButton.Foreground = foreground;
         NextButton.Foreground = foreground;
         RepeatButton.Foreground = foreground;
+
+        // progress bar follows the same theme color as the widget text
+        ProgressBarFill.Background = foreground;
+        ProgressBarTrack.Background = foreground;
+        ProgressBarTrack.Opacity = 0.15;
     }
 
     private void Grid_MouseEnter(object sender, MouseEventArgs e)

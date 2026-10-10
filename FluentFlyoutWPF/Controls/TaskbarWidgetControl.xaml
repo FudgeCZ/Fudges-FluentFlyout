@@ -128,10 +128,10 @@
                     </StackPanel>
                 </Grid>
             </Border>
-            <Grid x:Name="ProgressBarHost" Height="3" Margin="8,0,8,2" VerticalAlignment="Bottom" Visibility="Collapsed">
-                <Border CornerRadius="1.5" Background="{DynamicResource TextFillColorPrimaryBrush}" Opacity="0.15" />
-                <Border x:Name="ProgressBarFill" CornerRadius="1.5" HorizontalAlignment="Left" Width="0"
-                        Background="{DynamicResource MicaWPF.Brushes.SystemAccentColorTertiary}" />
+            <Grid x:Name="ProgressBarHost" Height="2" Margin="8,0,8,0" VerticalAlignment="Bottom" Visibility="Collapsed">
+                <Border x:Name="ProgressBarTrack" CornerRadius="1" Background="{DynamicResource TextFillColorPrimaryBrush}" Opacity="0.15" />
+                <Border x:Name="ProgressBarFill" CornerRadius="1" HorizontalAlignment="Left" Width="0"
+                        Background="{DynamicResource TextFillColorPrimaryBrush}" />
             </Grid>
             <Grid.ContextMenu>
                 <ContextMenu Style="{StaticResource UiContextMenu}">

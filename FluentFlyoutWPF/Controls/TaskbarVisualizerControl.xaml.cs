@@ -23,6 +23,9 @@ public partial class TaskbarVisualizerControl : UserControl
     // reference to main window for flyout functions
     private static readonly Visualizer visualizer = new();
 
+    /// <summary>The single shared Visualizer instance (for static hooks).</summary>
+    internal static Visualizer SharedVisualizer => visualizer;
+
     private static TaskbarVisualizerControl? _instance;
     private static System.Windows.Media.Effects.DropShadowEffect? _glowEffect;
     private static System.Windows.Threading.DispatcherTimer? _glowTimer;
@@ -47,6 +50,8 @@ public partial class TaskbarVisualizerControl : UserControl
 
         ApplyLength(SettingsManager.Current.TaskbarVisualizerLength);
         ApplyBeatGlow();
+        // settings hooks are skipped during deserialization — apply the audio source here
+        Visualizer.SetTargetApp(SettingsManager.Current.TaskbarVisualizerTargetApp);
 
         // for hover animation
         if (MainBorder.Background is not SolidColorBrush)

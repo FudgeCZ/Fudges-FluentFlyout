@@ -64,7 +64,6 @@ public partial class TaskbarWidgetControl : UserControl
     private bool _pauseOverlayShown;
     private bool? _lastPlayPauseState;
     private string? _lastTimeText;
-    private DispatcherTimer? _progressTimer;
     private TimeSpan _progressPosition;
     private DateTime _progressUpdated = DateTime.MinValue;
     private bool _progressPlaying;
@@ -907,23 +906,37 @@ public partial class TaskbarWidgetControl : UserControl
         }
 
         UpdateProgressFill();
-        if (playing && _progressTimer == null)
+        SubscribeProgressRendering(playing);
+    }
+
+    private bool _progressSubscribed;
+
+    /// <summary>
+    /// Updates the fill every WPF render frame while playing (perfectly smooth),
+    /// and unsubscribes when paused/collapsed.
+    /// </summary>
+    private void SubscribeProgressRendering(bool active)
+    {
+        if (active && !_progressSubscribed)
         {
-            _progressTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
-            _progressTimer.Tick += (_, _) => UpdateProgressFill();
-            _progressTimer.Start();
+            CompositionTarget.Rendering += OnProgressRendering;
+            _progressSubscribed = true;
         }
-        else if (!playing)
+        else if (!active && _progressSubscribed)
         {
-            StopProgressTimer();
-            UpdateProgressFill();
+            CompositionTarget.Rendering -= OnProgressRendering;
+            _progressSubscribed = false;
         }
+    }
+
+    private void OnProgressRendering(object? sender, EventArgs e)
+    {
+        UpdateProgressFill();
     }
 
     private void StopProgressTimer()
     {
-        _progressTimer?.Stop();
-        _progressTimer = null;
+        SubscribeProgressRendering(false);
     }
 
     private void UpdateProgressFill()

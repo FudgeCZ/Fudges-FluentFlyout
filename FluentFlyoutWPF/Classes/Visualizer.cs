@@ -88,6 +88,20 @@ namespace FluentFlyoutWPF.Classes
         /// </summary>
         public static float CurrentEnergy { get; private set; }
 
+        /// <summary>
+        /// Friendly app name the visualizer is gated to. Null/empty = animate on any
+        /// audio. Set via <see cref="SetTargetApp"/>.
+        /// </summary>
+        private static string? TargetApp;
+
+        /// <summary>
+        /// Whether the gated app is currently the playing media session (pushed from
+        /// MainWindow). When a target is set and this is false, bars decay to silence.
+        /// </summary>
+        public static bool TargetAudible { get; set; }
+
+        private readonly object _dataLock = new();
+
         public Visualizer()
         {
             ImageWidth = ContentWidthFromLength(SettingsManager.Current.TaskbarVisualizerLength);
@@ -215,6 +229,24 @@ namespace FluentFlyoutWPF.Classes
             _barValues = new float[BarCount];
         }
 
+        /// <summary>
+        /// Gates the visualizer to one app: bars animate only while that app is the
+        /// playing media session. Null/empty = animate on any audio.
+        /// </summary>
+        public static void SetTargetApp(string? appName)
+        {
+            string? next = string.IsNullOrWhiteSpace(appName) ? null : appName.Trim();
+            if (next == TargetApp)
+                return;
+
+            TargetApp = next;
+            if (SettingsManager.Current.TaskbarVisualizerEnabled)
+            {
+                FluentFlyout.Controls.TaskbarVisualizerControl.SharedVisualizer?
+                    .RequestRestart("visualizer target app changed");
+            }
+        }
+
         private static int ContentWidthFromLength(int controlLength)
         {
             return Math.Clamp(controlLength - ControlHorizontalMargin, MinContentWidth, MaxContentWidth) * Supersample;
@@ -244,9 +276,7 @@ namespace FluentFlyoutWPF.Classes
 
             try
             {
-                // Explicitly bind to the current default render endpoint.
-                // Using the parameterless capture can throw transient COM errors when the default endpoint is
-                // reconfiguring (e.g. Bluetooth earbuds disconnect/reconnect around lock/unlock).
+                // whole-system loopback on the default render endpoint
                 _renderDevice?.Dispose();
                 _renderDevice = string.IsNullOrWhiteSpace(_deviceId)
                      ? AudioDeviceMonitor.Instance.GetDefaultRenderDevice()
@@ -263,39 +293,48 @@ namespace FluentFlyoutWPF.Classes
                 _capture.StartRecording();
                 _isRunning = true;
                 _lastDataAvailableUtc = DateTime.UtcNow;
-
-                // automatic update timer in case audio data is not updated
-                _captureWatchdog = new(500)
-                {
-                    AutoReset = false
-                };
-                _captureWatchdog.Elapsed += (_, _) =>
-                {
-                    if (_isRunning)
-                    {
-                        for (int i = 0; i < _barValues.Length; i++)
-                        {
-                            _barValues[i] = 0;
-                        }
-                        CurrentEnergy = 0;
-                        UpdateBitmap();
-
-                        if (!SettingsManager.Current.TaskbarVisualizerBaseline || SettingsManager.Current.TaskbarVisualizerBaselineAutoHide) // if baseline is enabled and autohide is off, condition is false
-                            SettingsManager.Current.TaskbarVisualizerHasContent = false;
-
-                        // If we stop receiving loopback callbacks entirely (common after lock/unlock + device changes),
-                        // the timer fires once and then never again. Use it as a recovery trigger.
-                        var silenceFor = DateTime.UtcNow - _lastDataAvailableUtc;
-                        if (silenceFor > TimeSpan.FromSeconds(2))
-                        {
-                            RequestRestart($"no audio callbacks for {silenceFor.TotalSeconds:0.0}s");
-                        }
-                    }
-                };
+                StartWatchdog();
             }
             catch (Exception ex)
             {
                 Logger.Error(ex, "Failed to start visualizer");
+            }
+        }
+
+        private void StartWatchdog()
+        {
+            // automatic update timer in case audio data is not updated
+            _captureWatchdog = new(500)
+            {
+                AutoReset = false
+            };
+            _captureWatchdog.Elapsed += OnWatchdogTick;
+        }
+
+        private void OnWatchdogTick(object? sender, System.Timers.ElapsedEventArgs e)
+        {
+            if (!_isRunning)
+                return;
+
+            lock (_dataLock)
+            {
+                for (int i = 0; i < _barValues.Length; i++)
+                {
+                    _barValues[i] = 0;
+                }
+                CurrentEnergy = 0;
+                UpdateBitmap();
+            }
+
+            if (!SettingsManager.Current.TaskbarVisualizerBaseline || SettingsManager.Current.TaskbarVisualizerBaselineAutoHide) // if baseline is enabled and autohide is off, condition is false
+                SettingsManager.Current.TaskbarVisualizerHasContent = false;
+
+            // If we stop receiving loopback callbacks entirely (common after lock/unlock + device changes),
+            // the timer fires once and then never again. Use it as a recovery trigger.
+            var silenceFor = DateTime.UtcNow - _lastDataAvailableUtc;
+            if (silenceFor > TimeSpan.FromSeconds(2))
+            {
+                RequestRestart($"no audio callbacks for {silenceFor.TotalSeconds:0.0}s");
             }
         }
 
@@ -325,72 +364,86 @@ namespace FluentFlyoutWPF.Classes
             if (!_isRunning || e.BytesRecorded == 0)
                 return;
 
-            _lastDataAvailableUtc = DateTime.UtcNow;
-
-            _captureWatchdog.Stop();
-            _captureWatchdog.Start();
-
             int bytesPerSample = _capture!.WaveFormat.BitsPerSample / 8;
-            int samplesRecorded = e.BytesRecorded / bytesPerSample;
+            HandleAudioData(e.Buffer, e.BytesRecorded, bytesPerSample);
+        }
 
-            for (int i = 0; i < samplesRecorded; i++)
+        /// <summary>
+        /// Shared sample path for whole-system and per-process capture. Serializes FFT
+        /// state (multiple process captures deliver from different threads).
+        /// </summary>
+        private void HandleAudioData(byte[] buffer, int bytesRecorded, int bytesPerSample)
+        {
+            lock (_dataLock)
             {
-                float sampleValue = 0;
-                if (bytesPerSample == 4)
+                if (!_isRunning || bytesRecorded == 0)
+                    return;
+
+                _captureWatchdog?.Stop();
+                _captureWatchdog?.Start();
+                _lastDataAvailableUtc = DateTime.UtcNow;
+
+                int samplesRecorded = bytesRecorded / bytesPerSample;
+
+                for (int i = 0; i < samplesRecorded; i++)
                 {
-                    sampleValue = BitConverter.ToSingle(e.Buffer, i * 4);
-                }
-                else if (bytesPerSample == 2)
-                {
-                    sampleValue = BitConverter.ToInt16(e.Buffer, i * 2) / 32768f;
-                }
-
-                _fftBuffer[_fftPos].X = (float)(sampleValue * FastFourierTransform.HammingWindow(_fftPos, _fftLength));
-                _fftBuffer[_fftPos].Y = 0;
-                _fftPos++;
-
-                // When buffer isn't full, skip processing and continue filling
-                if (_fftPos < _fftLength)
-                    continue;
-
-                // perform FFT
-                _fftPos = 0;
-                ProcessFftData();
-
-                // Update UI with frame rate limiting
-                DateTime now = DateTime.UtcNow;
-                double minFrameTime = 1000.0 / _targetFps;
-                double timeSinceLastUpdate = (now - _lastUpdateTime).TotalMilliseconds;
-
-                if (timeSinceLastUpdate < minFrameTime)
-                    continue;
-
-                _lastUpdateTime = now;
-                SettingsManager.Current.TaskbarVisualizerHasContent = true;
-
-                if (SettingsManager.Current.TaskbarVisualizerBaseline && !SettingsManager.Current.TaskbarVisualizerBaselineAutoHide)
-                {
-                    // if baseline is enabled and autohide is off, we want to keep showing the bars even when they are all zero
-                    UpdateBitmap();
-                    break;
-                }
-
-                // check if bars are all zero, if so set has content to false to disable hover effect
-                bool allZero = true;
-                for (int j = 0; j < BarCount; j++)
-                {
-                    if (_barValues[j] > 0.01f)
+                    float sampleValue = 0;
+                    if (bytesPerSample == 4)
                     {
-                        allZero = false;
+                        sampleValue = BitConverter.ToSingle(buffer, i * 4);
+                    }
+                    else if (bytesPerSample == 2)
+                    {
+                        sampleValue = BitConverter.ToInt16(buffer, i * 2) / 32768f;
+                    }
+
+                    _fftBuffer[_fftPos].X = (float)(sampleValue * FastFourierTransform.HammingWindow(_fftPos, _fftLength));
+                    _fftBuffer[_fftPos].Y = 0;
+                    _fftPos++;
+
+                    // When buffer isn't full, skip processing and continue filling
+                    if (_fftPos < _fftLength)
+                        continue;
+
+                    // perform FFT
+                    _fftPos = 0;
+                    ProcessFftData();
+
+                    // Update UI with frame rate limiting
+                    DateTime now = DateTime.UtcNow;
+                    double minFrameTime = 1000.0 / _targetFps;
+                    double timeSinceLastUpdate = (now - _lastUpdateTime).TotalMilliseconds;
+
+                    if (timeSinceLastUpdate < minFrameTime)
+                        continue;
+
+                    _lastUpdateTime = now;
+                    SettingsManager.Current.TaskbarVisualizerHasContent = true;
+
+                    if (SettingsManager.Current.TaskbarVisualizerBaseline && !SettingsManager.Current.TaskbarVisualizerBaselineAutoHide)
+                    {
+                        // if baseline is enabled and autohide is off, we want to keep showing the bars even when they are all zero
+                        UpdateBitmap();
                         break;
                     }
-                }
 
-                // update bars if they have content
-                if (!allZero)
-                    UpdateBitmap();
-                else
-                    SettingsManager.Current.TaskbarVisualizerHasContent = false;
+                    // check if bars are all zero, if so set has content to false to disable hover effect
+                    bool allZero = true;
+                    for (int j = 0; j < BarCount; j++)
+                    {
+                        if (_barValues[j] > 0.01f)
+                        {
+                            allZero = false;
+                            break;
+                        }
+                    }
+
+                    // update bars if they have content
+                    if (!allZero)
+                        UpdateBitmap();
+                    else
+                        SettingsManager.Current.TaskbarVisualizerHasContent = false;
+                }
             }
         }
 

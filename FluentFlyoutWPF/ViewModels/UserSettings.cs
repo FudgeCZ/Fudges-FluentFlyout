@@ -646,6 +646,13 @@ public partial class UserSettings : ObservableObject
     public partial bool TaskbarVisualizerBeatGlow { get; set; }
 
     /// <summary>
+    /// Friendly app name whose audio only the taskbar visualizer shows
+    /// (WASAPI process loopback). Empty = whole system.
+    /// </summary>
+    [ObservableProperty]
+    public partial string TaskbarVisualizerTargetApp { get; set; }
+
+    /// <summary>
     /// Friendly name of the app whose media session wins over the focused session
     /// (e.g. "YouTube Music"). Empty = follow the focused session.
     /// </summary>
@@ -909,6 +916,7 @@ public partial class UserSettings : ObservableObject
         LyricsGeniusToken = "";
         TaskbarWidgetProgressBarEnabled = true;
         TaskbarVisualizerBeatGlow = true;
+        TaskbarVisualizerTargetApp = "";
         TaskbarVisualizerCenteredBars = false;
         TaskbarVisualizerBaseline = false;
         TaskbarVisualizerAudioSensitivity = 2;
@@ -1214,6 +1222,12 @@ public partial class UserSettings : ObservableObject
     {
         if (oldValue == newValue || _initializing) return;
         Application.Current?.Dispatcher?.BeginInvoke(() => FluentFlyout.Controls.TaskbarVisualizerControl.ApplyBeatGlow());
+    }
+
+    partial void OnTaskbarVisualizerTargetAppChanged(string oldValue, string newValue)
+    {
+        if (oldValue == newValue || _initializing) return;
+        Application.Current?.Dispatcher?.BeginInvoke(() => FluentFlyoutWPF.Classes.Visualizer.SetTargetApp(newValue));
     }
 
     partial void OnLyricsEnabledChanged(bool oldValue, bool newValue)

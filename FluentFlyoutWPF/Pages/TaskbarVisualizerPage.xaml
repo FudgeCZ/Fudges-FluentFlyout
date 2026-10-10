@@ -142,6 +142,18 @@
                 </StackPanel>
             </ui:CardControl>
 
+            <ui:CardControl x:Name="TaskbarVisualizerTargetAppTitleCard" Tag="Indexable" Icon="{ui:SymbolIcon AppGeneric24}" Margin="0,0,0,3">
+                <ui:CardControl.Header>
+                    <StackPanel Orientation="Vertical">
+                        <TextBlock Text="Audio source" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                        <TextBlock Text="The visualizer only animates while this app is playing audio. Pick &quot;Whole system&quot; to always animate. List is populated from apps currently playing." FontSize="12" Opacity="0.5" TextWrapping="Wrap" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <ComboBox x:Name="TargetAppComboBox" MinWidth="170" Style="{StaticResource DefaultComboBoxStyle}"
+                          DropDownOpened="TargetAppComboBox_DropDownOpened"
+                          SelectionChanged="TargetAppComboBox_SelectionChanged" />
+            </ui:CardControl>
+
             <ui:CardControl x:Name="TaskbarVisualizerBeatGlowTitleCard" Tag="Indexable" Icon="{ui:SymbolIcon Sparkle24}" Margin="0,0,0,3">
                 <ui:CardControl.Header>
                     <StackPanel Orientation="Vertical">

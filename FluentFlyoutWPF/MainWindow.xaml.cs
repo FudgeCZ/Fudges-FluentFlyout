@@ -608,6 +608,7 @@ public partial class MainWindow : MicaWindow
     /// MediaPropertyChanged event can be missed when a session publishes metadata
     /// before the media manager registers it — e.g. the phone receiver), and feeds
     /// the playback clock. Positions are extrapolated in the control between pushes.
+    /// Also drives the visualizer app gate.
     /// </summary>
     private void UpdateLyricsWidget()
     {
@@ -630,11 +631,46 @@ public partial class MainWindow : MicaWindow
             var timeline = session.ControlSession.GetTimelineProperties();
             lyrics.SetClock(timeline.Position, timeline.LastUpdatedTime.DateTime,
                 info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing);
+
+            UpdateVisualizerGate(mediaProps.Title, mediaProps.Artist,
+                info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing);
         }
         catch (Exception ex)
         {
             Logger.Debug(ex, "Failed to update lyrics widget");
         }
+    }
+
+    /// <summary>
+    /// Visualizer app gate: when a target app is configured, the equalizer animates
+    /// only while that app is the playing session (matched like the priority app).
+    /// </summary>
+    private void UpdateVisualizerGate(string title, string artist, bool playing)
+    {
+        var target = SettingsManager.Current.TaskbarVisualizerTargetApp;
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            Visualizer.TargetAudible = true;
+            return;
+        }
+
+        bool audible = playing;
+        if (audible)
+        {
+            try
+            {
+                var mediaProps = TryGetMediaProperties(GetActiveMediaSession()!.ControlSession);
+                string app = MediaPlayerData.GetAndCacheMediaPlayerData(GetActiveMediaSession()!.Id).Item1;
+                audible = app.Contains(target, StringComparison.OrdinalIgnoreCase) ||
+                          target.Contains(app, StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug(ex, "Failed to resolve visualizer gate app");
+            }
+        }
+
+        Visualizer.TargetAudible = audible;
     }
 
     /// <summary>

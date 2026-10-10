@@ -82,6 +82,12 @@ namespace FluentFlyoutWPF.Classes
             }
         }
 
+        /// <summary>
+        /// Smoothed 0..1 energy of the low-frequency bars, for beat-reactive effects.
+        /// 0 when silent or stopped.
+        /// </summary>
+        public static float CurrentEnergy { get; private set; }
+
         public Visualizer()
         {
             ImageWidth = ContentWidthFromLength(SettingsManager.Current.TaskbarVisualizerLength);
@@ -271,6 +277,7 @@ namespace FluentFlyoutWPF.Classes
                         {
                             _barValues[i] = 0;
                         }
+                        CurrentEnergy = 0;
                         UpdateBitmap();
 
                         if (!SettingsManager.Current.TaskbarVisualizerBaseline || SettingsManager.Current.TaskbarVisualizerBaselineAutoHide) // if baseline is enabled and autohide is off, condition is false
@@ -454,6 +461,14 @@ namespace FluentFlyoutWPF.Classes
                     //_barValues[i] = (_barValues[i] * 0.6f) + (currentBars[i] * 0.4f);
                 }
             }
+
+            // beat energy for glow effects: weighted low-end average, slightly smoothed
+            int energyBars = Math.Min(8, BarCount);
+            float energy = 0;
+            for (int i = 0; i < energyBars; i++)
+                energy += _barValues[i];
+            energy /= energyBars;
+            CurrentEnergy = CurrentEnergy * 0.7f + energy * 0.3f;
         }
 
         private void UpdateBitmap()

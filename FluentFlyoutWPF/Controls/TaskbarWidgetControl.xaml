@@ -24,6 +24,11 @@
                     <BlurEffect Radius="80" />
                 </Image.Effect>
             </Image>
+            <Image x:Name="BackgroundImageFade" Stretch="UniformToFill" HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5" Opacity="0">
+                <Image.Effect>
+                    <BlurEffect Radius="80" />
+                </Image.Effect>
+            </Image>
             <Border Name="TopBorder" BorderThickness="0,1.25,0,0" CornerRadius="5" Margin="0,0,0,1.25">
                 <Grid Name="MainGrid" HorizontalAlignment="Left" VerticalAlignment="Center" RenderTransformOrigin="0,0.5">
                     <Grid.RenderTransform>
@@ -33,6 +38,11 @@
                         <Border Name="SongImageBorder" CornerRadius="5" ClipToBounds="True" Width="36" Height="36" Panel.ZIndex="2">
                             <Grid>
                                 <ui:SymbolIcon Name="SongImagePlaceholder" Symbol="MusicNote220" FontSize="24" Filled="True" Foreground="{DynamicResource MicaWPF.Brushes.SystemAccentColorTertiary}" />
+                                <Border x:Name="SongImageFade" CornerRadius="5" Opacity="0">
+                                    <Border.Background>
+                                        <ImageBrush x:Name="SongImageFadeBrush" Stretch="UniformToFill" />
+                                    </Border.Background>
+                                </Border>
                             </Grid>
                             <Border.Background>
                                 <ImageBrush x:Name="SongImage" Stretch="UniformToFill" />
@@ -60,6 +70,9 @@
                         </StackPanel>
 
                         <TextBlock Name="TimeText" Text="" FontSize="11" Opacity="0.75" VerticalAlignment="Center" Margin="8,0,0,0">
+                            <TextBlock.RenderTransform>
+                                <TranslateTransform x:Name="TimeTextRoll" />
+                            </TextBlock.RenderTransform>
                             <TextBlock.Style>
                                 <Style TargetType="TextBlock">
                                     <Setter Property="Visibility" Value="Collapsed" />
@@ -115,6 +128,11 @@
                     </StackPanel>
                 </Grid>
             </Border>
+            <Grid x:Name="ProgressBarHost" Height="3" Margin="8,0,8,2" VerticalAlignment="Bottom" Visibility="Collapsed">
+                <Border CornerRadius="1.5" Background="{DynamicResource TextFillColorPrimaryBrush}" Opacity="0.15" />
+                <Border x:Name="ProgressBarFill" CornerRadius="1.5" HorizontalAlignment="Left" Width="0"
+                        Background="{DynamicResource MicaWPF.Brushes.SystemAccentColorTertiary}" />
+            </Grid>
             <Grid.ContextMenu>
                 <ContextMenu Style="{StaticResource UiContextMenu}">
                     <ui:MenuItem x:Name="ContextMenuMediaPlayer" Header="{DynamicResource OpenMediaPlayerText}" Click="ContextMenuMediaPlayer_Click">

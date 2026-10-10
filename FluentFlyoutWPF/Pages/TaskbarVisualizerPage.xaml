@@ -142,6 +142,16 @@
                 </StackPanel>
             </ui:CardControl>
 
+            <ui:CardControl x:Name="TaskbarVisualizerBeatGlowTitleCard" Tag="Indexable" Icon="{ui:SymbolIcon Sparkle24}" Margin="0,0,0,3">
+                <ui:CardControl.Header>
+                    <StackPanel Orientation="Vertical">
+                        <TextBlock Text="Beat glow" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                        <TextBlock Text="Soft glow around the visualizer that pulses with the beat of the audio." FontSize="12" Opacity="0.5" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <ui:ToggleSwitch IsChecked="{Binding TaskbarVisualizerBeatGlow, Mode=TwoWay}" IsEnabled="{Binding IsPremiumUnlocked}" />
+            </ui:CardControl>
+
             <ui:CardControl x:Name="TaskbarVisualizerCenteredBarsTitleCard" Tag="Indexable" Icon="{ui:SymbolIcon AlignCenterHorizontal24, Filled=True}" Margin="0,0,0,3">
                 <ui:CardControl.Header>
                     <StackPanel Orientation="Vertical">

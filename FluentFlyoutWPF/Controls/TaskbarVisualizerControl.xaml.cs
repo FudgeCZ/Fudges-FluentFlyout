@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 using FluentFlyout.Classes.Settings;
+using FluentFlyout.Classes.Utils;
 using FluentFlyoutWPF;
 using FluentFlyoutWPF.Classes;
 using System.Windows.Controls;
@@ -22,9 +23,15 @@ public partial class TaskbarVisualizerControl : UserControl
     // reference to main window for flyout functions
     private static readonly Visualizer visualizer = new();
 
+    private static TaskbarVisualizerControl? _instance;
+    private static System.Windows.Media.Effects.DropShadowEffect? _glowEffect;
+    private static System.Windows.Threading.DispatcherTimer? _glowTimer;
+
     public TaskbarVisualizerControl()
     {
         InitializeComponent();
+
+        _instance = this;
 
         // Set DataContext for bindings
         DataContext = SettingsManager.Current;
@@ -36,8 +43,10 @@ public partial class TaskbarVisualizerControl : UserControl
 
         SettingsManager.Current.PropertyChanged += SettingsManager_PropertyChanged;
         Unloaded += (_, _) => SettingsManager.Current.PropertyChanged -= SettingsManager_PropertyChanged;
+        Unloaded += (_, _) => _instance = null;
 
         ApplyLength(SettingsManager.Current.TaskbarVisualizerLength);
+        ApplyBeatGlow();
 
         // for hover animation
         if (MainBorder.Background is not SolidColorBrush)
@@ -78,11 +87,68 @@ public partial class TaskbarVisualizerControl : UserControl
         if (value)
         {
             visualizer.Start();
+            ApplyBeatGlow();
         }
         else
         {
             visualizer.Stop();
+            ApplyBeatGlow(); // visualizer off → glow off too
         }
+    }
+
+    /// <summary>
+    /// Beat-reactive glow: a soft DropShadow around the visualizer whose blur and
+    /// opacity follow the smoothed low-frequency energy of the audio.
+    /// </summary>
+    public static void ApplyBeatGlow()
+    {
+        bool enabled = SettingsManager.Current.TaskbarVisualizerEnabled &&
+                       SettingsManager.Current.TaskbarVisualizerBeatGlow;
+
+        if (System.Windows.Application.Current == null)
+            return;
+
+        System.Windows.Application.Current.Dispatcher.VerifyAccess();
+
+        if (!enabled)
+        {
+            _glowTimer?.Stop();
+            _glowTimer = null;
+            if (_instance != null)
+                _instance.MainBorder.Effect = null;
+            _glowEffect = null;
+            return;
+        }
+
+        _glowEffect ??= new System.Windows.Media.Effects.DropShadowEffect
+        {
+            ShadowDepth = 0,
+            BlurRadius = 0,
+            Opacity = 0,
+        };
+        if (_instance != null)
+            _instance.MainBorder.Effect = _glowEffect;
+
+        if (_glowTimer == null)
+        {
+            _glowTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(60) };
+            _glowTimer.Tick += (_, _) =>
+            {
+                if (_glowEffect == null || _instance == null)
+                    return;
+
+                float energy = Math.Clamp(Visualizer.CurrentEnergy, 0f, 1f);
+                _glowEffect.BlurRadius = (float)(6 + energy * 30);
+                _glowEffect.Opacity = 0.15 + energy * 0.55;
+
+                var brush = BitmapHelper.SavedDominantColors.Count > 0
+                    ? BitmapHelper.SavedDominantColors.Last()
+                    : (SolidColorBrush)System.Windows.Application.Current.TryFindResource("MicaWPF.Brushes.SystemAccentColorTertiary");
+                if (brush != null)
+                    _glowEffect.Color = brush.Color;
+            };
+        }
+        _glowTimer.Start();
     }
 
     public static void DisposeVisualizer()

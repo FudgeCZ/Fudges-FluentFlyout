@@ -10,6 +10,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using Windows.Media.Control;
 using Wpf.Ui.Controls;
 
@@ -60,6 +61,14 @@ public partial class TaskbarWidgetControl : UserControl
     private string _timeText = string.Empty;
     private bool? _shuffleAvailableOverride;   // set for sessions controllable via bridges (YT Music)
     private bool? _repeatAvailableOverride;
+    private bool _pauseOverlayShown;
+    private bool? _lastPlayPauseState;
+    private string? _lastTimeText;
+    private DispatcherTimer? _progressTimer;
+    private TimeSpan _progressPosition;
+    private DateTime _progressUpdated = DateTime.MinValue;
+    private bool _progressPlaying;
+    private TimeSpan _progressDuration = TimeSpan.Zero;
     private float? _appVolume;
 
     // reference to main window for flyout functions
@@ -673,6 +682,11 @@ public partial class TaskbarWidgetControl : UserControl
             if (SettingsManager.Current.TaskbarWidgetControlsEnabled)
             {
                 PlayPauseButton.Icon = _isPaused ? new SymbolIcon(SymbolRegular.Play24, filled: true) : new SymbolIcon(SymbolRegular.Pause24, filled: true);
+
+                // pulse the button when the play/pause state flips
+                if (_lastPlayPauseState.HasValue && _lastPlayPauseState.Value != _isPaused)
+                    PulseElement(PlayPauseButton);
+                _lastPlayPauseState = _isPaused;
             }
 
             // change color of icon
@@ -684,22 +698,25 @@ public partial class TaskbarWidgetControl : UserControl
             if (icon != null)
             {
                 if (_isPaused && SettingsManager.Current.TaskbarWidgetShowPauseOverlay)
-                { // show pause icon overlay
+                { // show pause icon overlay (animated)
+                    if (!_pauseOverlayShown)
+                        AnimatePauseOverlay(true);
                     SongImagePlaceholder.Symbol = SymbolRegular.Pause24;
                     SongImagePlaceholder.Visibility = Visibility.Visible;
-                    SongImage.Opacity = 0.4;
                 }
                 else
                 {
+                    if (_pauseOverlayShown)
+                        AnimatePauseOverlay(false);
                     SongImagePlaceholder.Visibility = Visibility.Collapsed;
-                    SongImage.Opacity = 1;
                 }
-                SongImage.ImageSource = icon;
-                BackgroundImage.Source = icon;
+                CrossfadeCover(icon);
                 SongImageBorder.Margin = new Thickness(0, 0, 0, -2); // align image better when cover is present
             }
             else
             {
+                if (_pauseOverlayShown)
+                    AnimatePauseOverlay(false);
                 SongImagePlaceholder.Symbol = SymbolRegular.MusicNote220;
                 SongImagePlaceholder.Visibility = Visibility.Visible;
                 SongImage.ImageSource = null;
@@ -846,11 +863,179 @@ public partial class TaskbarWidgetControl : UserControl
         Dispatcher.Invoke(() =>
         {
             _timeText = text;
+
+            // tiny roll animation when the displayed minute flips over
+            if (text != _lastTimeText && TimeTextRoll != null)
+            {
+                string? minuteOf(string? t) => t is null || t.Length < 4 ? t : t[..^1]; // "0:48 / 3:20" → minute bucket
+                if (_lastTimeText != null && minuteOf(_lastTimeText) != minuteOf(text))
+                {
+                    TimeTextRoll.BeginAnimation(TranslateTransform.YProperty,
+                        new DoubleAnimation(5, TimeSpan.FromMilliseconds(160)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
+                }
+            }
+            _lastTimeText = text;
+
             TimeText.Text = text;
             TimeText.Visibility = SettingsManager.Current.TaskbarWidgetTimeEnabled
                 && !_isVertical && !string.IsNullOrEmpty(text)
                 ? Visibility.Visible : Visibility.Collapsed;
         });
+    }
+
+    /// <summary>
+    /// Feeds the widget seek bar (position as of lastUpdated). Interpolated on a
+    /// 100 ms timer while playing; display-only.
+    /// </summary>
+    public void SetTimeline(TimeSpan position, DateTime lastUpdated, bool playing, TimeSpan duration)
+    {
+        _progressPosition = position;
+        _progressUpdated = lastUpdated;
+        _progressPlaying = playing;
+        _progressDuration = duration;
+
+        if (!SettingsManager.Current.TaskbarWidgetProgressBarEnabled || duration <= TimeSpan.Zero)
+        {
+            ProgressBarHost.Visibility = Visibility.Collapsed;
+            StopProgressTimer();
+            return;
+        }
+
+        UpdateProgressFill();
+        if (playing && _progressTimer == null)
+        {
+            _progressTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            _progressTimer.Tick += (_, _) => UpdateProgressFill();
+            _progressTimer.Start();
+        }
+        else if (!playing)
+        {
+            StopProgressTimer();
+            UpdateProgressFill();
+        }
+    }
+
+    private void StopProgressTimer()
+    {
+        _progressTimer?.Stop();
+        _progressTimer = null;
+    }
+
+    private void UpdateProgressFill()
+    {
+        if (ProgressBarHost == null)
+            return;
+
+        if (_progressDuration <= TimeSpan.Zero)
+        {
+            ProgressBarHost.Visibility = Visibility.Collapsed;
+            StopProgressTimer();
+            return;
+        }
+
+        ProgressBarHost.Visibility = Visibility.Visible;
+
+        var pos = _progressPosition;
+        if (_progressPlaying && _progressUpdated != DateTime.MinValue)
+            pos += DateTime.Now - _progressUpdated;
+
+        double fraction = Math.Clamp(pos / _progressDuration, 0, 1);
+        double trackWidth = Math.Max(0, ProgressBarHost.ActualWidth);
+        ProgressBarFill.Width = fraction * trackWidth;
+    }
+
+    /// <summary>Crossfades the cover and the blurred backdrop to a new image.</summary>
+    private void CrossfadeCover(BitmapImage icon)
+    {
+        // blurred backdrop: fade the old one out while the new one appears under it
+        if (BackgroundImage.Source != null && !ReferenceEquals(BackgroundImage.Source, icon))
+        {
+            BackgroundImageFade.Source = BackgroundImage.Source;
+            BackgroundImageFade.BeginAnimation(OpacityProperty, null);
+            BackgroundImageFade.Opacity = BackgroundImage.Opacity;
+
+            var fadeOut = new DoubleAnimation(0, TimeSpan.FromMilliseconds(400));
+            fadeOut.Completed += (_, _) =>
+            {
+                BackgroundImageFade.Source = null;
+                BackgroundImageFade.BeginAnimation(OpacityProperty, null);
+                BackgroundImageFade.Opacity = 0;
+            };
+            BackgroundImageFade.BeginAnimation(OpacityProperty, fadeOut);
+        }
+        BackgroundImage.Source = icon;
+
+        // cover: bring the new image in on the overlay layer, then commit it below
+        bool coverChanged = !ReferenceEquals(SongImage.ImageSource, icon);
+        if (coverChanged)
+        {
+            SongImageFadeBrush.ImageSource = icon;
+            SongImageFade.BeginAnimation(OpacityProperty, null);
+            SongImageFade.Opacity = 0;
+            SongImageFade.BeginAnimation(OpacityProperty,
+                new DoubleAnimation(1, TimeSpan.FromMilliseconds(300)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
+
+            var commit = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(320) };
+            commit.Tick += (_, _) =>
+            {
+                commit.Stop();
+                SongImage.ImageSource = icon;
+                SongImageFadeBrush.ImageSource = null;
+                SongImageFade.BeginAnimation(OpacityProperty, null);
+                SongImageFade.Opacity = 0;
+            };
+            commit.Start();
+        }
+    }
+
+    /// <summary>Animated pause overlay on the cover: fades/dims it in or out.</summary>
+    private void AnimatePauseOverlay(bool show)
+    {
+        _pauseOverlayShown = show;
+        var duration = TimeSpan.FromMilliseconds(220);
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+
+        if (show)
+        {
+            SongImage.BeginAnimation(Brush.OpacityProperty, null);
+            SongImage.BeginAnimation(Brush.OpacityProperty,
+                new DoubleAnimation(0.4, duration) { EasingFunction = ease });
+            SongImagePlaceholder.BeginAnimation(OpacityProperty, null);
+            SongImagePlaceholder.Opacity = 0;
+            SongImagePlaceholder.RenderTransformOrigin = new System.Windows.Point(0.5, 0.5);
+            SongImagePlaceholder.RenderTransform = new ScaleTransform(0.5, 0.5);
+            SongImagePlaceholder.BeginAnimation(OpacityProperty,
+                new DoubleAnimation(1, duration) { EasingFunction = ease });
+            if (SongImagePlaceholder.RenderTransform is ScaleTransform st)
+            {
+                st.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1, duration) { EasingFunction = ease });
+                st.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1, duration) { EasingFunction = ease });
+            }
+        }
+        else
+        {
+            SongImage.BeginAnimation(Brush.OpacityProperty,
+                new DoubleAnimation(1, duration) { EasingFunction = ease });
+            SongImagePlaceholder.BeginAnimation(OpacityProperty,
+                new DoubleAnimation(0, TimeSpan.FromMilliseconds(150)));
+        }
+    }
+
+    /// <summary>Quick scale pulse for icon swaps (play/pause state changes).</summary>
+    private static void PulseElement(System.Windows.UIElement element)
+    {
+        if (element is not FrameworkElement fe)
+            return;
+
+        fe.RenderTransformOrigin = new System.Windows.Point(0.5, 0.5);
+        var scale = fe.RenderTransform as ScaleTransform ?? new ScaleTransform();
+        fe.RenderTransform = scale;
+        var anim = new DoubleAnimation(0.8, 1, TimeSpan.FromMilliseconds(180))
+        {
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+        };
+        scale.BeginAnimation(ScaleTransform.ScaleXProperty, anim);
+        scale.BeginAnimation(ScaleTransform.ScaleYProperty, anim);
     }
 
     // Event handlers for context menu items

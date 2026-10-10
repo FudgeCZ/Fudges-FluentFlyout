@@ -529,6 +529,7 @@ public partial class MainWindow : MicaWindow
             {
                 taskbarWindow.Widget.UpdateShuffleRepeat(null, null);
                 taskbarWindow.Widget.UpdateTimeText("");
+                taskbarWindow.Widget.SetTimeline(TimeSpan.Zero, DateTime.MinValue, false, TimeSpan.Zero);
                 return;
             }
 
@@ -538,6 +539,7 @@ public partial class MainWindow : MicaWindow
             {
                 taskbarWindow.Widget.UpdateShuffleRepeat(null, null);
                 taskbarWindow.Widget.UpdateTimeText("");
+                taskbarWindow.Widget.SetTimeline(TimeSpan.Zero, DateTime.MinValue, false, TimeSpan.Zero);
                 return;
             }
 
@@ -563,6 +565,9 @@ public partial class MainWindow : MicaWindow
                 : timeline.Position;
             string time = $"{FormatTime(pos)} / {FormatTime(timeline.EndTime)}";
             taskbarWindow.Widget.UpdateTimeText(time);
+            taskbarWindow.Widget.SetTimeline(pos, timeline.LastUpdatedTime.DateTime,
+                info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing,
+                timeline.EndTime);
         }
         catch (Exception ex)
         {
@@ -953,7 +958,6 @@ public partial class MainWindow : MicaWindow
         var thumbnail = BitmapHelper.GetThumbnail(songInfo.Thumbnail);
         BitmapHelper.GetDominantColors(1);
         taskbarWindow?.UpdateUi(songInfo.Title, songInfo.Artist, thumbnail, playbackInfo.PlaybackStatus, playbackInfo.Controls);
-        UpdateTaskbarWidgetExtras();
         UpdateTaskbarWidgetExtras();
     }
 
@@ -1401,6 +1405,25 @@ public partial class MainWindow : MicaWindow
                     SymbolPlayPause.Symbol = Wpf.Ui.Controls.SymbolRegular.Play16;
                 }
 
+                // pulse on play/pause flips
+                if (_lastFlyoutPauseState.HasValue && _lastFlyoutPauseState.Value !=
+                    (mediaProperties.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing))
+                {
+                    var scale = ControlPlayPause.RenderTransform as ScaleTransform ?? new ScaleTransform(1, 1);
+                    ControlPlayPause.RenderTransform = scale;
+                    ControlPlayPause.RenderTransformOrigin = new System.Windows.Point(0.5, 0.5);
+                    var pulse = new System.Windows.Media.Animation.DoubleAnimation(0.85, 1,
+                        TimeSpan.FromMilliseconds(180))
+                    {
+                        EasingFunction = new System.Windows.Media.Animation.CubicEase
+                        { EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut },
+                    };
+                    scale.BeginAnimation(System.Windows.Media.ScaleTransform.ScaleXProperty, pulse);
+                    scale.BeginAnimation(System.Windows.Media.ScaleTransform.ScaleYProperty, pulse);
+                }
+                _lastFlyoutPauseState =
+                    mediaProperties.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
+
                 ControlPlayPause.IsEnabled = mediaProperties.Controls.IsPlayEnabled || mediaProperties.Controls.IsPauseEnabled;
 
                 ControlPlayPause.Opacity = ControlPlayPause.IsEnabled ? 1 : 0.35;
@@ -1755,6 +1778,7 @@ public partial class MainWindow : MicaWindow
     }
 
     private System.Windows.Threading.DispatcherTimer? _widgetTimeTimer;
+    private bool? _lastFlyoutPauseState; // for the flyout play/pause pulse animation
 
     private void SeekbarUpdateUi(object? sender)
     {

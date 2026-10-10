@@ -57,6 +57,8 @@ public partial class TaskbarLyricsControl : UserControl
     private int _generation; // invalidates pending fade-outs when new lyrics load
     private DateTime? _pausedSince;
     private bool _hiddenByPause;
+    private int? _trackOffsetMs;   // per-track sync offset (mouse wheel), overrides the global one
+    private DispatcherTimer? _offsetHintTimer;
 
     /// <summary>Whether the control currently has lyrics (or a search in progress) to display.</summary>
     public bool HasContent => Root.Visibility == Visibility.Visible && (_lines.Count > 0 || _loadingVisible);
@@ -79,6 +81,20 @@ public partial class TaskbarLyricsControl : UserControl
 
         _tickTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
         _tickTimer.Tick += (_, _) => TickScroll();
+
+        // make the strip hit-testable for wheel-based offset adjustment
+        ClipBorder.Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(1, 0, 0, 0));
+        ClipBorder.MouseWheel += LyricsControl_MouseWheel;
+
+        _offsetHintTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1100) };
+        _offsetHintTimer.Tick += (_, _) =>
+        {
+            _offsetHintTimer.Stop();
+            if (LoadingText.Text.StartsWith('+') || LoadingText.Text.StartsWith('-'))
+            {
+                LoadingText.Visibility = Visibility.Collapsed;
+            }
+        };
 
         // the loading indicator only appears if the fetch is still running after
         // a short grace period, so cache hits never flash it
@@ -157,6 +173,8 @@ public partial class TaskbarLyricsControl : UserControl
             Clear();
             return;
         }
+
+        _trackOffsetMs = LyricsService.Instance.GetOffsetMs(artist, title, duration);
 
         var svc = LyricsService.Instance;
         if (svc.StateOf(artist, title, duration) == LyricsTrackState.Found)
@@ -423,6 +441,29 @@ public partial class TaskbarLyricsControl : UserControl
 
     private static CubicEase EaseOut() => new() { EasingMode = EasingMode.EaseOut };
 
+    /// <summary>Mouse wheel over the widget nudges this track's sync offset (±100 ms).</summary>
+    private void LyricsControl_MouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+    {
+        if (_lastArtist == null || _lastTitle == null || !HasContent)
+            return;
+
+        int step = e.Delta > 0 ? 100 : -100;
+        int current = _trackOffsetMs ?? SettingsManager.Current.LyricsOffsetMs;
+        _trackOffsetMs = Math.Clamp(current + step, -5000, 5000);
+        e.Handled = true;
+
+        LyricsService.Instance.SetOffsetMs(_lastArtist, _lastTitle, _lastDuration, _trackOffsetMs.Value);
+
+        // brief "+0.3 s" confirmation on the strip
+        LoadingText.Foreground = GetTextBrush();
+        LoadingText.Text = _trackOffsetMs.Value >= 0
+            ? $"+{_trackOffsetMs.Value / 1000.0:0.#} s"
+            : $"{_trackOffsetMs.Value / 1000.0:0.#} s";
+        LoadingText.Visibility = Visibility.Visible;
+        _offsetHintTimer.Stop();
+        _offsetHintTimer.Start();
+    }
+
     private void TickScroll()
     {
         if (_lines.Count == 0 || Root.Visibility != Visibility.Visible)
@@ -431,7 +472,7 @@ public partial class TaskbarLyricsControl : UserControl
         var pos = _basePosition;
         if (_playing && _baseUpdated != DateTime.MinValue)
             pos += DateTime.Now - _baseUpdated;
-        pos += TimeSpan.FromMilliseconds(SettingsManager.Current.LyricsOffsetMs);
+        pos += TimeSpan.FromMilliseconds(_trackOffsetMs ?? SettingsManager.Current.LyricsOffsetMs);
 
         // pause auto-hide
         int hideAfter = SettingsManager.Current.LyricsHidePausedAfterSeconds;
@@ -507,6 +548,12 @@ public partial class TaskbarLyricsControl : UserControl
                 : InactiveLineOpacity;
             block.BeginAnimation(OpacityProperty,
                 new DoubleAnimation(opacity, LinePopDuration) { EasingFunction = EaseOut() });
+
+            // blur depth: lines near the active one are soft, distant ones stay unblurred
+            int distance = Math.Abs(i - index);
+            block.Effect = active || distance > 2
+                ? null
+                : new System.Windows.Media.Effects.BlurEffect { Radius = distance == 1 ? 1.6 : 2.4 };
 
             double scale = active ? ActiveLineScale : 1.0;
             if (block.RenderTransform is ScaleTransform st)

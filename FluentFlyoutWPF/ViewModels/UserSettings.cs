@@ -634,6 +634,18 @@ public partial class UserSettings : ObservableObject
     public partial int TaskbarVisualizerBarCount { get; set; }
 
     /// <summary>
+    /// Show a thin playback progress bar at the bottom of the taskbar widget.
+    /// </summary>
+    [ObservableProperty]
+    public partial bool TaskbarWidgetProgressBarEnabled { get; set; }
+
+    /// <summary>
+    /// Make the taskbar visualizer glow with the beat of the playing audio.
+    /// </summary>
+    [ObservableProperty]
+    public partial bool TaskbarVisualizerBeatGlow { get; set; }
+
+    /// <summary>
     /// Friendly name of the app whose media session wins over the focused session
     /// (e.g. "YouTube Music"). Empty = follow the focused session.
     /// </summary>
@@ -895,6 +907,8 @@ public partial class UserSettings : ObservableObject
         LyricsOffsetMs = 0;
         LyricsHidePausedAfterSeconds = 15;
         LyricsGeniusToken = "";
+        TaskbarWidgetProgressBarEnabled = true;
+        TaskbarVisualizerBeatGlow = true;
         TaskbarVisualizerCenteredBars = false;
         TaskbarVisualizerBaseline = false;
         TaskbarVisualizerAudioSensitivity = 2;
@@ -1194,6 +1208,12 @@ public partial class UserSettings : ObservableObject
     {
         if (oldValue == newValue || _initializing) return;
         UpdateTaskbar(); // control resizes itself + bitmap via PropertyChanged; this only repositions it
+    }
+
+    partial void OnTaskbarVisualizerBeatGlowChanged(bool oldValue, bool newValue)
+    {
+        if (oldValue == newValue || _initializing) return;
+        Application.Current?.Dispatcher?.BeginInvoke(() => FluentFlyout.Controls.TaskbarVisualizerControl.ApplyBeatGlow());
     }
 
     partial void OnLyricsEnabledChanged(bool oldValue, bool newValue)

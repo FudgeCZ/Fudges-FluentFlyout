@@ -521,6 +521,68 @@ public sealed class LyricsService
             Logger.Warn(ex, "Failed to clear lyrics cache");
         }
         Instance._memoryCache.Clear();
+        lock (Instance._offsets)
+        {
+            Instance._offsets.Clear();
+        }
+        try { File.Delete(OffsetsPath); } catch { /* best effort */ }
+    }
+
+    // --- per-track sync offset memory ---
+
+    private static string OffsetsPath => Path.Combine(CacheDir, "offsets.json");
+    private readonly Dictionary<string, int> _offsets = [];
+    private bool _offsetsLoaded;
+    private readonly object _offsetsLock = new();
+
+    /// <summary>Per-track sync offset in ms, or null when the track has none.</summary>
+    public int? GetOffsetMs(string artist, string title, TimeSpan duration)
+    {
+        lock (_offsetsLock)
+        {
+            EnsureOffsetsLoaded();
+            return _offsets.TryGetValue(MakeKey(artist, title, duration), out var v) ? v : null;
+        }
+    }
+
+    public void SetOffsetMs(string artist, string title, TimeSpan duration, int offsetMs)
+    {
+        lock (_offsetsLock)
+        {
+            EnsureOffsetsLoaded();
+            _offsets[MakeKey(artist, title, duration)] = offsetMs;
+            try
+            {
+                Directory.CreateDirectory(CacheDir);
+                File.WriteAllText(OffsetsPath,
+                    JsonSerializer.Serialize(_offsets, JsonOptions));
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug(ex, "Failed to save lyrics offsets");
+            }
+        }
+    }
+
+    private void EnsureOffsetsLoaded()
+    {
+        if (_offsetsLoaded)
+            return;
+        _offsetsLoaded = true;
+        try
+        {
+            if (File.Exists(OffsetsPath))
+            {
+                var data = JsonSerializer.Deserialize<Dictionary<string, int>>(File.ReadAllText(OffsetsPath), JsonOptions);
+                if (data != null)
+                    foreach (var kv in data)
+                        _offsets[kv.Key] = kv.Value;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed to load lyrics offsets");
+        }
     }
 
     private static string MakeKey(string artist, string title, TimeSpan duration) =>

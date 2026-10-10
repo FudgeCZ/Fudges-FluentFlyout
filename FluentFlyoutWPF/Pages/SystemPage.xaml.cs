@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 using FluentFlyout.Classes.Settings;
+using FluentFlyout.Classes.Utils;
 using FluentFlyoutWPF.Classes.Utils;
 using Microsoft.Win32;
 using NLog;
@@ -21,6 +22,50 @@ public partial class SystemPage : Page
         InitializeComponent();
         DataContext = SettingsManager.Current;
         UpdateMonitorList();
+        Loaded += (_, _) => RefreshPriorityItems();
+    }
+
+    /// <summary>
+    /// Fills the priority ComboBox with "(none)" plus every app that currently has a
+    /// media session; the stored choice is kept visible even if that app is closed.
+    /// </summary>
+    private void RefreshPriorityItems()
+    {
+        var items = new List<string> { "(none)" };
+
+        var mainWindow = Application.Current.MainWindow as MainWindow;
+        if (mainWindow?.mediaManager != null)
+        {
+            items.AddRange(mainWindow.mediaManager.CurrentMediaSessions.Values
+                .Select(s => MediaPlayerData.GetAndCacheMediaPlayerData(s.Id).Item1)
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .Distinct()
+                .OrderBy(n => n));
+        }
+
+        var current = SettingsManager.Current.MediaSessionPriorityApp;
+        if (!string.IsNullOrWhiteSpace(current) && !items.Contains(current, System.StringComparer.OrdinalIgnoreCase))
+            items.Insert(1, current);
+
+        PriorityComboBox.SelectedItem = null;
+        PriorityComboBox.ItemsSource = items;
+        PriorityComboBox.SelectedItem = string.IsNullOrWhiteSpace(current) ? "(none)" : current;
+    }
+
+    private void PriorityComboBox_DropDownOpened(object sender, EventArgs e)
+    {
+        RefreshPriorityItems();
+    }
+
+    private void PriorityComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (PriorityComboBox.SelectedItem is not string app) return;
+
+        var value = app == "(none)" ? "" : app;
+        if (SettingsManager.Current.MediaSessionPriorityApp == value) return;
+
+        SettingsManager.Current.MediaSessionPriorityApp = value;
+        SettingsManager.SaveSettings();
     }
 
     private void StartupSwitch_Click(object sender, RoutedEventArgs e)

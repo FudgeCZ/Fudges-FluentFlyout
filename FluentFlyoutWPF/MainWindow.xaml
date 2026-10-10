@@ -155,10 +155,15 @@
                         </StackPanel>
                         <Grid Name="ControlsStackPanelContainer" HorizontalAlignment="Stretch" Height="35" Margin="12,8,0,0">
                             <StackPanel Name="ControlsStackPanel" Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
-                                <!--<ui:Button Name="ControlBack" Icon="{ui:SymbolIcon Previous20, Filled=True}" Width="28" Height="28" Padding="0" CornerRadius="999" Margin="0,0,8,0" Click="Back_Click" Focusable="False"/>-->
+                                <controls:Button
+                                    Height="28" Width="28" Name="ControlShuffle"
+                                    Margin="0" Click="Shuffle_Click" Focusable="False"
+                                    Style="{StaticResource MicaWPF.Styles.TransparentButton}" VerticalAlignment="Center">
+                                    <ui:SymbolIcon Name="SymbolShuffle" Symbol="ArrowShuffleOff24" Filled="false" Opacity="0.5" FontSize="18"/>
+                                </controls:Button>
                                 <controls:Button
                                     Height="28" Width="28" Name="ControlBack"
-                                    Margin="0" Click="Back_Click" Focusable="False"
+                                    Margin="8,0,0,0" Click="Back_Click" Focusable="False"
                                     Style="{StaticResource MicaWPF.Styles.TransparentButton}" VerticalAlignment="Center">
                                     <ui:SymbolIcon Name="SymbolBack" Symbol="Previous20" Filled="True"/>
                                 </controls:Button>
@@ -175,23 +180,17 @@
                                     <ui:SymbolIcon Name="SymbolForward" Symbol="Next20" Filled="True"/>
                                 </controls:Button>
                                 <controls:Button
-                                    Width="28" Height="28" Name="ControlClose"
-                                    Margin="8,0,0,0" Click="MediaFlyoutCloseButton_Click"
-                                    Style="{StaticResource MicaWPF.Styles.TransparentButton}" VerticalAlignment="Center"
-                                    Visibility="Collapsed">
-                                    <ui:SymbolIcon Symbol="Dismiss20" Filled="True"/>
-                                </controls:Button>
-                                <controls:Button
                                     Height="28" Width="28" Name="ControlRepeat"
                                     Margin="8,0,0,0" Click="Repeat_Click" Focusable="False"
                                     Style="{StaticResource MicaWPF.Styles.TransparentButton}" VerticalAlignment="Center">
                                     <ui:SymbolIcon Name="SymbolRepeat" Symbol="ArrowRepeatAllOff24" Filled="false" Opacity="0.5" FontSize="18"/>
                                 </controls:Button>
                                 <controls:Button
-                                    Height="28" Width="28" Name="ControlShuffle"
-                                    Margin="8,0,0,0" Click="Shuffle_Click" Focusable="False"
-                                    Style="{StaticResource MicaWPF.Styles.TransparentButton}" VerticalAlignment="Center">
-                                    <ui:SymbolIcon Name="SymbolShuffle" Symbol="ArrowShuffleOff24" Filled="false" Opacity="0.5" FontSize="18"/>
+                                    Width="28" Height="28" Name="ControlClose"
+                                    Margin="8,0,0,0" Click="MediaFlyoutCloseButton_Click"
+                                    Style="{StaticResource MicaWPF.Styles.TransparentButton}" VerticalAlignment="Center"
+                                    Visibility="Collapsed">
+                                    <ui:SymbolIcon Symbol="Dismiss20" Filled="True"/>
                                 </controls:Button>
 
                                 <controls:Button Name="MediaIdButton" Padding="0" Height="28" Width="70"

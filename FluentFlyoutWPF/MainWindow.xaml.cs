@@ -171,6 +171,23 @@ public partial class MainWindow : MicaWindow
 
         mediaManager.Start();
 
+        // dedicated 1s heartbeat so the taskbar widget time always reflects the
+        // player's own timeline updates, regardless of flyout visibility/state
+        _widgetTimeTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _widgetTimeTimer.Tick += (_, _) =>
+        {
+            if (taskbarWindow == null) return;
+            if (SettingsManager.Current.TaskbarWidgetTimeEnabled)
+                UpdateTaskbarWidgetExtras();
+            UpdateLyricsWidget();
+            if (IsYtmActiveWithBridge())
+                _ = RefreshYtmStateAsync();
+        };
+        _widgetTimeTimer.Start();
+
+        // start the phone receiver (Phone Music Listener bridge) with restored settings
+        Classes.Services.Phone.PhoneReceiverService.Instance.ApplyFromSettings();
+
         _hookProc = HookCallback;
         _hookId = SetHook(_hookProc);
 
@@ -323,6 +340,21 @@ public partial class MainWindow : MicaWindow
             SettingsManager.Current.PinnedSessionId = string.Empty;
         }
 
+        // user-chosen priority app beats the focused session
+        var priorityApp = SettingsManager.Current.MediaSessionPriorityApp;
+        if (!string.IsNullOrWhiteSpace(priorityApp))
+        {
+            var prioritized = validSessions.FirstOrDefault(s =>
+            {
+                string name = MediaPlayerData.GetAndCacheMediaPlayerData(s.Id).Item1;
+                return name.Equals(priorityApp, StringComparison.OrdinalIgnoreCase) ||
+                       name.Contains(priorityApp, StringComparison.OrdinalIgnoreCase) ||
+                       priorityApp.Contains(name, StringComparison.OrdinalIgnoreCase);
+            });
+            if (prioritized != null)
+                return prioritized;
+        }
+
         var focused = mediaManager.GetFocusedSession();
         if (focused != null && validSessions.Any(s => s.Id == focused.Id))
             return focused;
@@ -409,6 +441,221 @@ public partial class MainWindow : MicaWindow
         var focusedSession = GetActiveMediaSession();
         if (focusedSession == null) return false;
         return await focusedSession.ControlSession.TrySkipNextAsync();
+    }
+
+    private bool? _ytmShuffleState;                 // YT Music shuffle state from the bridge
+    private int? _ytmRepeatState;                   // 0 off, 1 all, 2 one
+    private DateTime _lastYtmStateFetch = DateTime.MinValue;
+
+    /// <summary>True when the focused session is YT Music and the bridge can control it.</summary>
+    private bool IsYtmActiveWithBridge()
+    {
+        return SettingsManager.Current.YtmBridgeEnabled && IsYtmSession(GetActiveMediaSession());
+    }
+
+    /// <summary>Pulls shuffle/repeat state from the YT Music bridge (debounced) and refreshes the UI.</summary>
+    private async Task RefreshYtmStateAsync(bool force = false)
+    {
+        if (!IsYtmActiveWithBridge())
+        {
+            _ytmShuffleState = null;
+            _ytmRepeatState = null;
+            return;
+        }
+        if (!force && (DateTime.UtcNow - _lastYtmStateFetch).TotalSeconds < 4) return;
+        _lastYtmStateFetch = DateTime.UtcNow;
+
+        (_ytmShuffleState, _ytmRepeatState) = await YtmBridgeService.Instance.GetShuffleRepeatStateAsync();
+        UpdateTaskbarWidgetExtras();
+        if (GetActiveMediaSession() is { } session && IsYtmSession(session))
+            UpdateUI(session);
+    }
+
+    private static bool IsYtmSession(MediaSession? session)
+    {
+        if (session?.Id == null) return false;
+        string id = session.Id.ToLowerInvariant();
+        return id.Contains("youtube music") || id.Contains("youtube-music") || id.Contains("youtube_music");
+    }
+
+    public async Task<bool> TryToggleShuffleAsync()
+    {
+        var focusedSession = GetActiveMediaSession();
+        if (focusedSession == null) return false;
+
+        // SMTC cannot set shuffle for other apps' sessions — route YouTube Music
+        // through its API Server plugin instead
+        if (SettingsManager.Current.YtmBridgeEnabled && IsYtmSession(focusedSession))
+        {
+            bool ok = await YtmBridgeService.Instance.ToggleShuffleAsync();
+            if (ok) await RefreshYtmStateAsync(force: true);
+            return ok;
+        }
+
+        bool shuffleOn = focusedSession.ControlSession.GetPlaybackInfo().IsShuffleActive == true;
+        return await focusedSession.ControlSession.TryChangeShuffleActiveAsync(!shuffleOn);
+    }
+
+    public async Task<bool> TryCycleRepeatAsync()
+    {
+        var focusedSession = GetActiveMediaSession();
+        if (focusedSession == null) return false;
+
+        if (SettingsManager.Current.YtmBridgeEnabled && IsYtmSession(focusedSession))
+        {
+            bool ok = await YtmBridgeService.Instance.CycleRepeatAsync();
+            if (ok) await RefreshYtmStateAsync(force: true);
+            return ok;
+        }
+
+        var next = focusedSession.ControlSession.GetPlaybackInfo().AutoRepeatMode switch
+        {
+            global::Windows.Media.MediaPlaybackAutoRepeatMode.List => global::Windows.Media.MediaPlaybackAutoRepeatMode.Track,
+            global::Windows.Media.MediaPlaybackAutoRepeatMode.Track => global::Windows.Media.MediaPlaybackAutoRepeatMode.None,
+            _ => global::Windows.Media.MediaPlaybackAutoRepeatMode.List,
+        };
+        return await focusedSession.ControlSession.TryChangeAutoRepeatModeAsync(next);
+    }
+
+    /// <summary>
+    /// Pushes shuffle/repeat states and the time readout to the taskbar widget.
+    /// </summary>
+    public void UpdateTaskbarWidgetExtras()
+    {
+        if (taskbarWindow == null) return;
+        try
+        {
+            if (GetActiveMediaSession() is not { } session)
+            {
+                taskbarWindow.Widget.UpdateShuffleRepeat(null, null);
+                taskbarWindow.Widget.UpdateTimeText("");
+                return;
+            }
+
+            var info = session.ControlSession.GetPlaybackInfo();
+
+            if (info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed)
+            {
+                taskbarWindow.Widget.UpdateShuffleRepeat(null, null);
+                taskbarWindow.Widget.UpdateTimeText("");
+                return;
+            }
+
+            bool ytm = SettingsManager.Current.YtmBridgeEnabled && IsYtmSession(session);
+            int? repeatMode = info.AutoRepeatMode switch
+            {
+                global::Windows.Media.MediaPlaybackAutoRepeatMode.List => 1,
+                global::Windows.Media.MediaPlaybackAutoRepeatMode.Track => 2,
+                global::Windows.Media.MediaPlaybackAutoRepeatMode.None => 0,
+                _ => null,
+            };
+            taskbarWindow.Widget.UpdateShuffleRepeat(
+                ytm ? _ytmShuffleState : info.IsShuffleActive,
+                ytm ? _ytmRepeatState : repeatMode,
+                ytm ? true : null,
+                ytm ? true : null);
+
+            // real data from the player's own timeline updates; extrapolate between
+            // pushes only while actually playing
+            var timeline = session.ControlSession.GetTimelineProperties();
+            var pos = info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing
+                ? timeline.Position + (DateTime.Now - timeline.LastUpdatedTime.DateTime)
+                : timeline.Position;
+            string time = $"{FormatTime(pos)} / {FormatTime(timeline.EndTime)}";
+            taskbarWindow.Widget.UpdateTimeText(time);
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed to update taskbar widget extras");
+        }
+    }
+
+    private static string FormatTime(TimeSpan t) =>
+        t.TotalHours >= 1 ? t.ToString(@"h\:mm\:ss") : t.ToString(@"m\:ss");
+
+    /// <summary>Requests lyrics for the current track (taskbar lyrics widget).</summary>
+    public void NotifyLyricsTrackChanged(string title, string artist)
+    {
+        if (!SettingsManager.Current.LyricsEnabled) return;
+
+        string key = $"{artist}|{title}";
+        TimeSpan duration = TimeSpan.Zero;
+        try
+        {
+            if (GetActiveMediaSession() is { } session)
+                duration = session.ControlSession.GetTimelineProperties().EndTime;
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed to read timeline for lyrics");
+        }
+
+        taskbarWindow?.Dispatcher.BeginInvoke(() =>
+        {
+            if (key == _lyricsTrackKey) return;
+            _lyricsTrackKey = key;
+            taskbarWindow.Lyrics.SetTrack(artist, title, duration);
+        });
+    }
+
+    /// <summary>
+    /// 1 Hz lyrics upkeep: pushes the playing track if it changed (the
+    /// MediaPropertyChanged event can be missed when a session publishes metadata
+    /// before the media manager registers it — e.g. the phone receiver), and feeds
+    /// the playback clock. Positions are extrapolated in the control between pushes.
+    /// </summary>
+    private void UpdateLyricsWidget()
+    {
+        var lyrics = taskbarWindow?.Lyrics;
+        if (lyrics == null) return;
+
+        try
+        {
+            if (GetActiveMediaSession() is not { } session) return;
+
+            var info = session.ControlSession.GetPlaybackInfo();
+            if (info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed) return;
+
+            var mediaProps = TryGetMediaProperties(session.ControlSession);
+            if (mediaProps == null || string.IsNullOrWhiteSpace(mediaProps.Title)) return;
+
+            NotifyLyricsTrackChanged(mediaProps.Title, mediaProps.Artist);
+
+            // always feed the clock: it also drives the pause auto-hide
+            var timeline = session.ControlSession.GetTimelineProperties();
+            lyrics.SetClock(timeline.Position, timeline.LastUpdatedTime.DateTime,
+                info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing);
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed to update lyrics widget");
+        }
+    }
+
+    /// <summary>
+    /// Pushes the already-playing track to the lyrics widget (startup / taskbar window recreation).
+    /// </summary>
+    public void PushInitialLyricsTrack()
+    {
+        try
+        {
+            if (GetActiveMediaSession() is not { } session) return;
+            var info = TryGetMediaProperties(session.ControlSession);
+            if (info == null || string.IsNullOrWhiteSpace(info.Title)) return;
+            NotifyLyricsTrackChanged(info.Title, info.Artist);
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed to push initial lyrics track");
+        }
+    }
+
+    private string _lyricsTrackKey = ""; // track identity already pushed to the lyrics widget
+
+    public void RefreshMediaUi()
+    {
+        if (GetActiveMediaSession() is { } session)
+            UpdateUI(session);
     }
 
     public async Task<bool> TryOpenMediaPlayerAsync()
@@ -706,6 +953,8 @@ public partial class MainWindow : MicaWindow
         var thumbnail = BitmapHelper.GetThumbnail(songInfo.Thumbnail);
         BitmapHelper.GetDominantColors(1);
         taskbarWindow?.UpdateUi(songInfo.Title, songInfo.Artist, thumbnail, playbackInfo.PlaybackStatus, playbackInfo.Controls);
+        UpdateTaskbarWidgetExtras();
+        UpdateTaskbarWidgetExtras();
     }
 
     public void reportBug(object? sender, EventArgs e)
@@ -771,6 +1020,7 @@ public partial class MainWindow : MicaWindow
             var tbPlayback = focusedSession.ControlSession.GetPlaybackInfo();
 
             taskbarWindow?.UpdateUi(tbSongInfo.Title, tbSongInfo.Artist, tbThumbnail, tbPlayback?.PlaybackStatus, tbPlayback?.Controls);
+            UpdateTaskbarWidgetExtras();
         }
 
         if (IsVisible)
@@ -822,6 +1072,8 @@ public partial class MainWindow : MicaWindow
         BitmapHelper.GetDominantColors(1);
 
         taskbarWindow?.UpdateUi(songInfo.Title, songInfo.Artist, thumbnail, playbackInfo.PlaybackStatus, playbackInfo.Controls);
+
+        NotifyLyricsTrackChanged(songInfo.Title, songInfo.Artist);
 
         pauseOtherMediaSessionsIfNeeded(mediaSession);
 
@@ -891,6 +1143,9 @@ public partial class MainWindow : MicaWindow
                 HandlePlayBackState(session.ControlSession.GetPlaybackInfo().PlaybackStatus);
             });
         }
+
+        UpdateTaskbarWidgetExtras();
+        UpdateLyricsWidget();
     }
 
     private void MediaManager_OnAnySessionClosed(MediaSession mediaSession)
@@ -903,6 +1158,14 @@ public partial class MainWindow : MicaWindow
         {
             SettingsManager.Current.PinnedSessionId = string.Empty;
         }
+
+        // nothing playing anymore — the lyrics widget must not linger
+        if (GetActiveMediaSession() == null)
+        {
+            _lyricsTrackKey = "";
+            taskbarWindow?.Dispatcher.BeginInvoke(() => taskbarWindow.Lyrics.Clear());
+        }
+
         UpdateTaskbar();
     }
 
@@ -1126,6 +1389,7 @@ public partial class MainWindow : MicaWindow
             }
 
             var mediaProperties = controlSession.GetPlaybackInfo();
+            bool ytmActive = SettingsManager.Current.YtmBridgeEnabled && IsYtmSession(mediaSession);
             if (mediaProperties != null)
             {
                 if (mediaProperties.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
@@ -1144,12 +1408,22 @@ public partial class MainWindow : MicaWindow
                 ControlBack.IsEnabled = ControlForward.IsEnabled = mediaProperties.Controls.IsNextEnabled;
                 ControlBack.Opacity = ControlForward.Opacity = mediaProperties.Controls.IsNextEnabled ? 1 : 0.35;
 
-                if (SettingsManager.Current.RepeatEnabled && !SettingsManager.Current.CompactLayout)
+                if ((SettingsManager.Current.RepeatEnabled || ytmActive) && !SettingsManager.Current.CompactLayout)
                 {
                     ControlRepeat.Visibility = Visibility.Visible;
-                    ControlRepeat.IsEnabled = mediaProperties.Controls.IsRepeatEnabled;
-                    ControlRepeat.Opacity = mediaProperties.Controls.IsRepeatEnabled ? 1 : 0.35;
-                    if (mediaProperties.AutoRepeatMode == global::Windows.Media.MediaPlaybackAutoRepeatMode.List)
+                    ControlRepeat.IsEnabled = mediaProperties.Controls.IsRepeatEnabled || ytmActive;
+                    ControlRepeat.Opacity = ControlRepeat.IsEnabled ? 1 : 0.35;
+                    if (ytmActive && _ytmRepeatState.HasValue)
+                    {
+                        // YT Music doesn't report repeat over SMTC — show the bridge state
+                        (SymbolRepeat.Symbol, SymbolRepeat.Opacity) = _ytmRepeatState.Value switch
+                        {
+                            1 => (Wpf.Ui.Controls.SymbolRegular.ArrowRepeatAll24, 1.0),
+                            2 => (Wpf.Ui.Controls.SymbolRegular.ArrowRepeat124, 1.0),
+                            _ => (Wpf.Ui.Controls.SymbolRegular.ArrowRepeatAllOff24, 0.5),
+                        };
+                    }
+                    else if (mediaProperties.AutoRepeatMode == global::Windows.Media.MediaPlaybackAutoRepeatMode.List)
                     {
                         SymbolRepeat.Symbol = Wpf.Ui.Controls.SymbolRegular.ArrowRepeatAll24;
                         SymbolRepeat.Opacity = 1;
@@ -1168,12 +1442,20 @@ public partial class MainWindow : MicaWindow
                 else ControlRepeat.Visibility = Visibility.Collapsed;
 
 
-                if (SettingsManager.Current.ShuffleEnabled && !SettingsManager.Current.CompactLayout)
+                if ((SettingsManager.Current.ShuffleEnabled || ytmActive) && !SettingsManager.Current.CompactLayout)
                 {
                     ControlShuffle.Visibility = Visibility.Visible;
-                    ControlShuffle.IsEnabled = mediaProperties.Controls.IsShuffleEnabled;
-                    ControlShuffle.Opacity = mediaProperties.Controls.IsShuffleEnabled ? 1 : 0.35;
-                    if (mediaProperties.IsShuffleActive == true)
+                    ControlShuffle.IsEnabled = mediaProperties.Controls.IsShuffleEnabled || ytmActive;
+                    ControlShuffle.Opacity = ControlShuffle.IsEnabled ? 1 : 0.35;
+                    if (ytmActive && _ytmShuffleState.HasValue)
+                    {
+                        // YT Music doesn't report shuffle over SMTC — show the bridge state
+                        SymbolShuffle.Symbol = _ytmShuffleState.Value
+                            ? Wpf.Ui.Controls.SymbolRegular.ArrowShuffle24
+                            : Wpf.Ui.Controls.SymbolRegular.ArrowShuffleOff24;
+                        SymbolShuffle.Opacity = _ytmShuffleState.Value ? 1.0 : 0.5;
+                    }
+                    else if (mediaProperties.IsShuffleActive == true)
                     {
                         SymbolShuffle.Symbol = Wpf.Ui.Controls.SymbolRegular.ArrowShuffle24;
                         SymbolShuffle.Opacity = 1;
@@ -1384,6 +1666,13 @@ public partial class MainWindow : MicaWindow
         var activeSession = GetActiveMediaSession();
         if (activeSession == null) return;
 
+        // YTM's repeat state isn't reflected over SMTC — route through the API bridge
+        if (SettingsManager.Current.YtmBridgeEnabled && IsYtmSession(activeSession))
+        {
+            await TryCycleRepeatAsync();
+            return;
+        }
+
         if (activeSession.ControlSession.GetPlaybackInfo().AutoRepeatMode == global::Windows.Media.MediaPlaybackAutoRepeatMode.None)
         {
             SymbolRepeat.Dispatcher.Invoke(() => SymbolRepeat.Symbol = Wpf.Ui.Controls.SymbolRegular.ArrowRepeatAll24);
@@ -1405,6 +1694,13 @@ public partial class MainWindow : MicaWindow
     {
         var activeSession = GetActiveMediaSession();
         if (activeSession == null) return;
+
+        // YTM's shuffle state isn't reflected over SMTC — skip optimistic icon swap
+        if (SettingsManager.Current.YtmBridgeEnabled && IsYtmSession(activeSession))
+        {
+            await TryToggleShuffleAsync();
+            return;
+        }
 
         if (activeSession.ControlSession.GetPlaybackInfo().IsShuffleActive == true)
         {
@@ -1458,9 +1754,15 @@ public partial class MainWindow : MicaWindow
         });
     }
 
+    private System.Windows.Threading.DispatcherTimer? _widgetTimeTimer;
+
     private void SeekbarUpdateUi(object? sender)
     {
         if (DateTime.Now.Subtract(_lastSelfUpdateTimestamp).TotalSeconds < 1) return;
+
+        // keep the taskbar widget time ticking even when the flyout is hidden
+        if (SettingsManager.Current.TaskbarWidgetTimeEnabled && Visibility != Visibility.Visible)
+            UpdateTaskbarWidgetExtras();
 
         if (!_seekBarEnabled || Visibility != Visibility.Visible || _isDragging) return;
         if (GetActiveMediaSession() is not { } session) return;
@@ -1530,6 +1832,8 @@ public partial class MainWindow : MicaWindow
             mediaManager.OnAnySessionClosed -= MediaManager_OnAnySessionClosed;
 
             // dispose managed resources
+            Classes.Services.Phone.PhoneReceiverService.Instance.Dispose();
+            _widgetTimeTimer?.Stop();
             _positionTimer?.Change(Timeout.Infinite, Timeout.Infinite);
             _positionTimer?.Dispose();
             cts?.Cancel();

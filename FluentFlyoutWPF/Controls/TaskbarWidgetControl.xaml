@@ -59,6 +59,19 @@
                             </Canvas>
                         </StackPanel>
 
+                        <TextBlock Name="TimeText" Text="" FontSize="11" Opacity="0.75" VerticalAlignment="Center" Margin="8,0,0,0">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding TaskbarWidgetTimeEnabled}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+
                         <StackPanel Name="ControlsStackPanel" Orientation="Horizontal" VerticalAlignment="Center" Width="Auto">
                             <StackPanel.Style>
                                 <Style TargetType="StackPanel">
@@ -70,9 +83,33 @@
                                     </Style.Triggers>
                                 </Style>
                             </StackPanel.Style>
+                            <ui:Button Name="ShuffleButton" Appearance="Transparent" Icon="{ui:SymbolIcon ArrowShuffleOff24}" Height="32" Width="32" Padding="0" BorderThickness="0" Margin="0,0,0,-1" Click="Shuffle_Click">
+                                <ui:Button.Style>
+                                    <Style TargetType="ui:Button" BasedOn="{StaticResource {x:Type ui:Button}}">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding TaskbarWidgetShuffleRepeatEnabled}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </ui:Button.Style>
+                            </ui:Button>
                             <ui:Button Name="PreviousButton" Appearance="Transparent" Icon="{ui:SymbolIcon Previous20, Filled=True}" Height="32" Width="32" Padding="0" BorderThickness="0" Margin="0,0,0,-1" Click="Previous_Click"/>
                             <ui:Button Name="PlayPauseButton" Appearance="Transparent" Icon="{ui:SymbolIcon Pause16, Filled=True}" Height="32" Width="32" Padding="0" BorderThickness="0" Margin="0,0,0,-1" Click="PlayPause_Click"/>
                             <ui:Button Name="NextButton" Appearance="Transparent" Icon="{ui:SymbolIcon Next20, Filled=True}" Height="32" Width="32" Padding="0" BorderThickness="0" Margin="0,0,0,-1" Click="Next_Click"/>
+                            <ui:Button Name="RepeatButton" Appearance="Transparent" Icon="{ui:SymbolIcon ArrowRepeatAllOff24}" Height="32" Width="32" Padding="0" BorderThickness="0" Margin="0,0,0,-1" Click="Repeat_Click">
+                                <ui:Button.Style>
+                                    <Style TargetType="ui:Button" BasedOn="{StaticResource {x:Type ui:Button}}">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding TaskbarWidgetShuffleRepeatEnabled}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </ui:Button.Style>
+                            </ui:Button>
                         </StackPanel>
 
                     </StackPanel>

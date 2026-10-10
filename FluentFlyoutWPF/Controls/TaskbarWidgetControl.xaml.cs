@@ -57,6 +57,9 @@ public partial class TaskbarWidgetControl : UserControl
     private string _actualTitle = string.Empty;
     private string _actualArtist = string.Empty;
     private string _songInfoTooltip = string.Empty;
+    private string _timeText = string.Empty;
+    private bool? _shuffleAvailableOverride;   // set for sessions controllable via bridges (YT Music)
+    private bool? _repeatAvailableOverride;
     private float? _appVolume;
 
     // reference to main window for flyout functions
@@ -127,11 +130,16 @@ public partial class TaskbarWidgetControl : UserControl
         SongImageBorder.RenderTransformOrigin = new System.Windows.Point(0.5, 0.5);
         SongImageBorder.RenderTransform = (Transform?)counterRotate ?? Transform.Identity;
 
-        foreach (var button in new Wpf.Ui.Controls.Button[] { PreviousButton, PlayPauseButton, NextButton })
+        foreach (var button in new Wpf.Ui.Controls.Button[] { ShuffleButton, PreviousButton, PlayPauseButton, NextButton, RepeatButton })
         {
             button.RenderTransformOrigin = new System.Windows.Point(0.5, 0.5);
             button.RenderTransform = (Transform?)counterRotate ?? Transform.Identity;
         }
+
+        // the time readout doesn't fit a vertical taskbar
+        TimeText.Visibility = isVertical || string.IsNullOrEmpty(_timeText) ||
+            !SettingsManager.Current.TaskbarWidgetTimeEnabled
+            ? Visibility.Collapsed : Visibility.Visible;
     }
 
     public void SetSmallTaskbarMode(bool isSmallTaskbar)
@@ -147,7 +155,7 @@ public partial class TaskbarWidgetControl : UserControl
         SongImagePlaceholder.FontSize = isSmallTaskbar ? SmallPlaceholderIconSize : DefaultPlaceholderIconSize;
 
         double controlButtonSize = isSmallTaskbar ? SmallControlButtonSize : DefaultControlButtonSize;
-        foreach (var button in new Wpf.Ui.Controls.Button[] { PreviousButton, PlayPauseButton, NextButton })
+        foreach (var button in new Wpf.Ui.Controls.Button[] { ShuffleButton, PreviousButton, PlayPauseButton, NextButton, RepeatButton })
         {
             button.Width = controlButtonSize;
             button.Height = controlButtonSize;
@@ -170,9 +178,12 @@ public partial class TaskbarWidgetControl : UserControl
 
         SongTitle.Foreground = foreground;
         SongArtist.Foreground = foreground;
+        TimeText.Foreground = foreground;
+        ShuffleButton.Foreground = foreground;
         PreviousButton.Foreground = foreground;
         PlayPauseButton.Foreground = foreground;
         NextButton.Foreground = foreground;
+        RepeatButton.Foreground = foreground;
     }
 
     private void Grid_MouseEnter(object sender, MouseEventArgs e)
@@ -335,11 +346,20 @@ public partial class TaskbarWidgetControl : UserControl
         // add space for playback controls if enabled and visible
         if (SettingsManager.Current.TaskbarWidgetControlsEnabled && ControlsStackPanel.Visibility == Visibility.Visible)
         {
-            double controlsWidth = PreviousButton.Width + PlayPauseButton.Width + NextButton.Width;
+            double controlsWidth = 0;
+            foreach (var button in new[] { ShuffleButton, PreviousButton, PlayPauseButton, NextButton, RepeatButton })
+                if (button.Visibility == Visibility.Visible)
+                    controlsWidth += button.Width;
             if (!_isVertical)
                 controlsWidth += ControlsStackPanel.Margin.Left + ControlsStackPanel.Margin.Right;
 
             logicalWidth += controlsWidth;
+        }
+
+        // add space for the time readout if enabled and showing something
+        if (SettingsManager.Current.TaskbarWidgetTimeEnabled && !_isVertical && !string.IsNullOrEmpty(_timeText))
+        {
+            logicalWidth += StringWidth.GetStringWidth(_timeText, 400) + TimeText.Margin.Left + TimeText.Margin.Right + 2;
         }
 
         double logicalHeight = _isSmallTaskbar ? SmallTaskbarWidgetHeight : DefaultTaskbarWidgetHeight;
@@ -499,6 +519,46 @@ public partial class TaskbarWidgetControl : UserControl
         }
     }
 
+    /// <summary>
+    /// Animates the widget sliding down out of the taskbar, then collapses it.
+    /// </summary>
+    public void SlideOutThenCollapse()
+    {
+        Dispatcher.Invoke(() =>
+        {
+            if (Visibility != Visibility.Visible) return;
+
+            var translate = MainBorder.RenderTransform as TranslateTransform ?? new TranslateTransform();
+            MainBorder.RenderTransform = translate;
+
+            var slide = new DoubleAnimation(0, 50, TimeSpan.FromMilliseconds(220))
+            {
+                EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseIn }
+            };
+            slide.Completed += (_, _) =>
+            {
+                Visibility = Visibility.Collapsed;
+                translate.BeginAnimation(TranslateTransform.YProperty, null);
+                translate.Y = 0;
+            };
+
+            var fade = new DoubleAnimation(MainBorder.Opacity, 0, TimeSpan.FromMilliseconds(220));
+            translate.BeginAnimation(TranslateTransform.YProperty, slide);
+            MainBorder.BeginAnimation(OpacityProperty, fade);
+        });
+    }
+
+    private void ResetSlideOutState()
+    {
+        MainBorder.BeginAnimation(OpacityProperty, null);
+        MainBorder.Opacity = 1;
+        if (MainBorder.RenderTransform is TranslateTransform translate)
+        {
+            translate.BeginAnimation(TranslateTransform.YProperty, null);
+            translate.Y = 0;
+        }
+    }
+
     public void UpdateUi(string title, string artist, BitmapImage? icon, GlobalSystemMediaTransportControlsSessionPlaybackStatus? playbackStatus, GlobalSystemMediaTransportControlsSessionPlaybackControls? playbackControls = null)
     {
         if (title == "-" && artist == "-")
@@ -510,10 +570,17 @@ public partial class TaskbarWidgetControl : UserControl
                 _actualArtist = string.Empty;
                 _songInfoTooltip = string.Empty;
                 _appVolume = null;
+                _timeText = string.Empty;
+                TimeText.Text = string.Empty;
+                TimeText.Visibility = Visibility.Collapsed;
+                UpdateShuffleRepeat(null, null);
 
                 if (SettingsManager.Current.TaskbarWidgetHideCompletely)
                 {
-                    Visibility = Visibility.Collapsed;
+                    if (Visibility == Visibility.Visible && MainBorder.Opacity > 0)
+                        SlideOutThenCollapse();
+                    else
+                        Visibility = Visibility.Collapsed;
                     return;
                 }
 
@@ -546,11 +613,21 @@ public partial class TaskbarWidgetControl : UserControl
         // adjust UI based on available controls
         Dispatcher.Invoke(() =>
         {
+            ResetSlideOutState();
+
             if (SettingsManager.Current.TaskbarWidgetControlsEnabled && playbackControls != null)
             {
+                // bridges (YT Music) can force availability even when SMTC doesn't report it
+                bool shuffleEnabled = _shuffleAvailableOverride ?? playbackControls.IsShuffleEnabled;
+                bool repeatEnabled = _repeatAvailableOverride ?? playbackControls.IsRepeatEnabled;
+
+                ShuffleButton.IsHitTestVisible = shuffleEnabled;
+                ShuffleButton.Opacity = shuffleEnabled ? 1 : 0.5;
                 PreviousButton.IsHitTestVisible = playbackControls.IsPreviousEnabled;
                 PlayPauseButton.IsHitTestVisible = playbackControls.IsPauseEnabled || playbackControls.IsPlayEnabled;
                 NextButton.IsHitTestVisible = playbackControls.IsNextEnabled;
+                RepeatButton.IsHitTestVisible = repeatEnabled;
+                RepeatButton.Opacity = repeatEnabled ? 1 : 0.5;
 
                 PreviousButton.Opacity = playbackControls.IsPreviousEnabled ? 1 : 0.5;
                 PlayPauseButton.Opacity = (playbackControls.IsPauseEnabled || playbackControls.IsPlayEnabled) ? 1 : 0.5;
@@ -558,13 +635,11 @@ public partial class TaskbarWidgetControl : UserControl
             }
             else
             {
-                PreviousButton.IsHitTestVisible = false;
-                PlayPauseButton.IsHitTestVisible = false;
-                NextButton.IsHitTestVisible = false;
-
-                PreviousButton.Opacity = 0.5;
-                NextButton.Opacity = 0.5;
-                PlayPauseButton.Opacity = 0.5;
+                foreach (var button in new Wpf.Ui.Controls.Button[] { ShuffleButton, PreviousButton, PlayPauseButton, NextButton, RepeatButton })
+                {
+                    button.IsHitTestVisible = false;
+                    button.Opacity = 0.5;
+                }
             }
         });
 
@@ -724,6 +799,58 @@ public partial class TaskbarWidgetControl : UserControl
     {
         if (_mainWindow == null) return;
         await _mainWindow.TrySkipNextAsync();
+    }
+
+    private async void Shuffle_Click(object sender, RoutedEventArgs e)
+    {
+        if (_mainWindow == null) return;
+        await _mainWindow.TryToggleShuffleAsync();
+    }
+
+    private async void Repeat_Click(object sender, RoutedEventArgs e)
+    {
+        if (_mainWindow == null) return;
+        await _mainWindow.TryCycleRepeatAsync();
+    }
+
+    /// <summary>
+    /// Updates the shuffle/repeat button states from the active session's playback info.
+    /// shuffleActive: null/true/false; repeatMode: 0 = off, 1 = all, 2 = one, null = unknown.
+    /// </summary>
+    public void UpdateShuffleRepeat(bool? shuffleActive, int? repeatMode, bool? shuffleAvailable = null, bool? repeatAvailable = null)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            _shuffleAvailableOverride = shuffleAvailable;
+            _repeatAvailableOverride = repeatAvailable;
+
+            bool shuffleOn = shuffleActive == true;
+            ShuffleButton.Icon = new SymbolIcon(shuffleOn ? SymbolRegular.ArrowShuffle24 : SymbolRegular.ArrowShuffleOff24, filled: shuffleOn);
+            if (shuffleAvailable.HasValue) ShuffleButton.IsHitTestVisible = shuffleAvailable.Value;
+            ShuffleButton.Opacity = shuffleOn ? 1 : (shuffleAvailable == true ? 0.75 : 0.6);
+
+            RepeatButton.Icon = repeatMode switch
+            {
+                1 => new SymbolIcon(SymbolRegular.ArrowRepeatAll24, filled: true),
+                2 => new SymbolIcon(SymbolRegular.ArrowRepeat124, filled: true),
+                _ => new SymbolIcon(SymbolRegular.ArrowRepeatAllOff24),
+            };
+            if (repeatAvailable.HasValue) RepeatButton.IsHitTestVisible = repeatAvailable.Value;
+            RepeatButton.Opacity = repeatMode is 1 or 2 ? 1 : (repeatAvailable == true ? 0.75 : 0.6);
+        });
+    }
+
+    /// <summary>Sets the "2:10 / 3:42" time readout.</summary>
+    public void UpdateTimeText(string text)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            _timeText = text;
+            TimeText.Text = text;
+            TimeText.Visibility = SettingsManager.Current.TaskbarWidgetTimeEnabled
+                && !_isVertical && !string.IsNullOrEmpty(text)
+                ? Visibility.Visible : Visibility.Collapsed;
+        });
     }
 
     // Event handlers for context menu items

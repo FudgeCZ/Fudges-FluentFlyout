@@ -34,7 +34,10 @@ public partial class TaskbarVisualizerControl : UserControl
             visualizer.Start();
         }
 
-        VisualizerContainer.Source = visualizer.Bitmap;
+        SettingsManager.Current.PropertyChanged += SettingsManager_PropertyChanged;
+        Unloaded += (_, _) => SettingsManager.Current.PropertyChanged -= SettingsManager_PropertyChanged;
+
+        ApplyLength(SettingsManager.Current.TaskbarVisualizerLength);
 
         // for hover animation
         if (MainBorder.Background is not SolidColorBrush)
@@ -44,6 +47,22 @@ public partial class TaskbarVisualizerControl : UserControl
         }
 
         Background = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0));
+    }
+
+    private void SettingsManager_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(SettingsManager.Current.TaskbarVisualizerLength))
+            ApplyLength(SettingsManager.Current.TaskbarVisualizerLength);
+    }
+
+    private void ApplyLength(int length)
+    {
+        Width = length;
+        visualizer.SetLength(length);
+        VisualizerContainer.Source = visualizer.Bitmap; // SetLength recreates the bitmap
+        // reposition once the new Width has been laid out (settings hook fires before it)
+        Dispatcher.BeginInvoke(() => (System.Windows.Application.Current?.MainWindow as MainWindow)?.UpdateTaskbar(),
+            System.Windows.Threading.DispatcherPriority.Background);
     }
 
     public void SetSmallTaskbarMode(bool isSmallTaskbar)

@@ -1,0 +1,109 @@
+<Page x:Class="FluentFlyoutWPF.Pages.LyricsPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+      xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      xmlns:controls="clr-namespace:MicaWPF.Controls;assembly=MicaWPF"
+      xmlns:viewModels="clr-namespace:FluentFlyoutWPF.ViewModels"
+      mc:Ignorable="d"
+      d:DesignHeight="800" d:DesignWidth="800"
+      Title="LyricsPage"
+      d:DataContext="{d:DesignInstance viewModels:UserSettings}"
+      Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+      d:Background="White">
+
+    <StackPanel MaxWidth="1000" Margin="16">
+        <TextBlock Text="Lyrics" FontSize="24" FontWeight="SemiBold" FontFamily="Segoe UI Variable" Margin="0,0,0,20" />
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,24">
+            <TextBlock FontSize="14" FontWeight="Regular" Opacity="0.75" MaxWidth="600" TextWrapping="WrapWithOverflow"
+                       Text="Shows scrolling lyrics in the taskbar, next to the visualizer. The widget appears only when lyrics are found for the current track. Right-click the widget to switch providers for the current song." />
+        </StackPanel>
+
+        <ui:CardControl Icon="{ui:SymbolIcon MusicNote120}" Margin="0,0,0,3">
+            <ui:CardControl.Header>
+                <StackPanel Orientation="Vertical">
+                    <TextBlock Text="Lyrics widget" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                    <TextBlock Text="Enable the scrolling lyrics widget in the taskbar." FontSize="12" Opacity="0.5" />
+                </StackPanel>
+            </ui:CardControl.Header>
+            <ui:ToggleSwitch IsChecked="{Binding LyricsEnabled, Mode=TwoWay}" />
+        </ui:CardControl>
+
+        <ui:CardControl Icon="{ui:SymbolIcon Pause24}" Margin="0,0,0,3">
+            <ui:CardControl.Header>
+                <StackPanel Orientation="Vertical">
+                    <TextBlock Text="Hide when paused" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                    <TextBlock Text="Fade the lyrics out after this many seconds of paused playback. 0 = keep showing." FontSize="12" Opacity="0.5" />
+                </StackPanel>
+            </ui:CardControl.Header>
+            <StackPanel Orientation="Horizontal">
+                <Slider Minimum="0" Maximum="120" Value="{Binding LyricsHidePausedAfterSeconds, Mode=TwoWay}" TickFrequency="5" IsSnapToTickEnabled="True" Width="150"
+                        IsMoveToPointEnabled="True" />
+                <ui:TextBlock Text="{Binding LyricsHidePausedAfterSeconds}" Width="32" TextAlignment="Center" Margin="12,0,0,0" />
+            </StackPanel>
+        </ui:CardControl>
+
+        <ui:CardControl Icon="{ui:SymbolIcon Globe24}" Margin="0,0,0,3">
+            <ui:CardControl.Header>
+                <StackPanel Orientation="Vertical">
+                    <TextBlock Text="Main provider" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                    <TextBlock Text="Where lyrics are fetched from. LRCLIB provides synced lyrics; Musixmatch is experimental." FontSize="12" Opacity="0.5" />
+                </StackPanel>
+            </ui:CardControl.Header>
+            <ComboBox SelectedIndex="{Binding LyricsProvider}" Style="{StaticResource DefaultComboBoxStyle}">
+                <ComboBoxItem Content="LRCLIB" />
+                <ComboBoxItem Content="Musixmatch" />
+                <ComboBoxItem Content="LyricsGenius" />
+            </ComboBox>
+        </ui:CardControl>
+
+        <ui:CardControl x:Name="GeniusTokenCard" Icon="{ui:SymbolIcon Key24}" Margin="0,0,0,3">
+            <ui:CardControl.Header>
+                <StackPanel Orientation="Vertical">
+                    <TextBlock Text="Genius API token" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                    <TextBlock Text="Access token from genius.com/api-clients. Required for the LyricsGenius provider." FontSize="12" Opacity="0.5" />
+                </StackPanel>
+            </ui:CardControl.Header>
+            <TextBox Text="{Binding LyricsGeniusToken, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" MinWidth="240" />
+        </ui:CardControl>
+
+        <ui:CardControl Icon="{ui:SymbolIcon ArrowAutofitWidth24}" Margin="0,0,0,3">
+            <ui:CardControl.Header>
+                <StackPanel Orientation="Vertical">
+                    <TextBlock Text="Width" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                    <TextBlock Text="Width of the lyrics widget, in pixels." FontSize="12" Opacity="0.5" />
+                </StackPanel>
+            </ui:CardControl.Header>
+            <StackPanel Orientation="Horizontal">
+                <Slider Minimum="60" Maximum="400" Value="{Binding LyricsWidth, Mode=TwoWay}" TickFrequency="4" IsSnapToTickEnabled="True" Width="150"
+                        IsMoveToPointEnabled="True" />
+                <ui:TextBlock Text="{Binding LyricsWidth}" Width="32" TextAlignment="Center" Margin="12,0,0,0" />
+            </StackPanel>
+        </ui:CardControl>
+
+        <ui:CardControl Icon="{ui:SymbolIcon ArrowClockwise24}" Margin="0,0,0,3">
+            <ui:CardControl.Header>
+                <StackPanel Orientation="Vertical">
+                    <TextBlock Text="Sync offset" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                    <TextBlock Text="Shift lyrics earlier or later, in milliseconds. Use if lyrics are out of sync." FontSize="12" Opacity="0.5" />
+                </StackPanel>
+            </ui:CardControl.Header>
+            <StackPanel Orientation="Horizontal">
+                <Slider Minimum="-5000" Maximum="5000" Value="{Binding LyricsOffsetMs, Mode=TwoWay}" TickFrequency="100" IsSnapToTickEnabled="True" Width="150"
+                        IsMoveToPointEnabled="True" />
+                <ui:TextBlock Text="{Binding LyricsOffsetMs}" Width="48" TextAlignment="Center" Margin="12,0,0,0" />
+            </StackPanel>
+        </ui:CardControl>
+
+        <ui:CardControl Icon="{ui:SymbolIcon Delete24}" Margin="0,0,0,12">
+            <ui:CardControl.Header>
+                <StackPanel Orientation="Vertical">
+                    <TextBlock Text="Clear lyrics cache" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                    <TextBlock Text="Deletes all cached lyrics (they will be fetched again when needed)." FontSize="12" Opacity="0.5" />
+                </StackPanel>
+            </ui:CardControl.Header>
+            <Button Content="Clear" Click="ClearCache_Click" />
+        </ui:CardControl>
+    </StackPanel>
+</Page>

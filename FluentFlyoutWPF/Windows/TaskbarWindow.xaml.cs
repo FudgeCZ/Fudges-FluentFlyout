@@ -121,6 +121,8 @@ public partial class TaskbarWindow : Window
         SetupWindow();
         _mainWindow = (MainWindow)Application.Current.MainWindow;
         Widget.SetMainWindow(_mainWindow);
+        Lyrics.ContentChanged += () => UpdatePosition();
+        _mainWindow.PushInitialLyricsTrack();
     }
 
     private IntPtr GetSelectedTaskbarHandle(out bool isMainTaskbarSelected)
@@ -425,6 +427,7 @@ on_error:
 
             Widget.SetSmallTaskbarMode(isSmallTaskbar);
             TaskbarVisualizer.SetSmallTaskbarMode(isSmallTaskbar);
+            Lyrics.SetSmallTaskbarMode(isSmallTaskbar);
 
             // Following SetWindowPos will set the position relative to the parent window,
             // so those coordinates need to be converted.
@@ -440,10 +443,11 @@ on_error:
                      containerPos.X, containerPos.Y,
                      containerWidth, containerHeight,
                      SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS | SWP_SHOWWINDOW);
-            var wRect = PositionWidget(taskbarHandle, taskbarRect, dpiScale, isMainTaskbarSelected, isVertical);
+            var wRect = PositionWidget(taskbarHandle, taskbarRect, dpiScale, isMainTaskbarSelected, isVertical, Lyrics.HasContent);
             var vRect = PositionVisualizer(taskbarHandle, taskbarRect, dpiScale, isMainTaskbarSelected, isVertical);
+            var lRect = PositionLyrics(taskbarHandle, taskbarRect, dpiScale, isMainTaskbarSelected, isVertical);
 
-            UpdateWindowRegion(taskbarWindowHandle, wRect, vRect);
+            UpdateWindowRegion(taskbarWindowHandle, wRect, vRect, lRect);
 
             _lastSelectedMonitor = SettingsManager.Current.TaskbarWidgetSelectedMonitor;
         }
@@ -453,7 +457,7 @@ on_error:
         }
     }
 
-    private Rect PositionWidget(IntPtr taskbarHandle, RECT taskbarRect, double dpiScale, bool isMainTaskbarSelected, bool isVertical)
+    private Rect PositionWidget(IntPtr taskbarHandle, RECT taskbarRect, double dpiScale, bool isMainTaskbarSelected, bool isVertical, bool lyricsVisible)
     {
         if (!SettingsManager.Current.TaskbarWidgetEnabled)
             return Rect.Empty;
@@ -495,6 +499,10 @@ on_error:
                 if (SettingsManager.Current.TaskbarVisualizerEnabled && SettingsManager.Current.TaskbarVisualizerPosition == 0)
                     primaryPos += (int)(TaskbarVisualizer.Width * dpiScale) + 4;
 
+                // lyrics sit on the outer side of the visualizer chain (same side rules)
+                if (lyricsVisible && SettingsManager.Current.TaskbarVisualizerPosition == 0)
+                    primaryPos += (int)(Lyrics.Width * dpiScale) + 4;
+
                 if (!SettingsManager.Current.TaskbarWidgetPadding)
                     break;
 
@@ -533,6 +541,12 @@ on_error:
                         primaryPos += (int)(TaskbarVisualizer.Width * dpiScale) / 2 + 4;
                     else
                         primaryPos -= (int)(TaskbarVisualizer.Width * dpiScale) / 2 - 4;
+
+                if (lyricsVisible)
+                    if (SettingsManager.Current.TaskbarVisualizerPosition == 0)
+                        primaryPos += (int)(Lyrics.Width * dpiScale) / 2 + 4;
+                    else
+                        primaryPos -= (int)(Lyrics.Width * dpiScale) / 2 + 4;
                 break;
 
             case 2: // near end (right for horizontal, bottom for vertical)
@@ -540,6 +554,9 @@ on_error:
                 {
                     if (SettingsManager.Current.TaskbarVisualizerEnabled && SettingsManager.Current.TaskbarVisualizerPosition == 1)
                         primaryPos -= (int)(TaskbarVisualizer.Width * dpiScale) - 4;
+
+                    if (lyricsVisible && SettingsManager.Current.TaskbarVisualizerPosition == 1)
+                        primaryPos -= (int)(Lyrics.Width * dpiScale) + 4;
 
                     // Horizontal only: try to position next to native Widgets button on the end side
                     if (!isVertical && SettingsManager.Current.TaskbarWidgetPadding)
@@ -699,6 +716,50 @@ on_error:
         return new Rect(Canvas.GetLeft(TaskbarVisualizer) * dpiScale, Canvas.GetTop(TaskbarVisualizer) * dpiScale, rectW, rectH);
     }
 
+    private Rect PositionLyrics(IntPtr taskbarHandle, RECT taskbarRect, double dpiScale, bool isMainTaskbarSelected, bool isVertical)
+    {
+        if (!SettingsManager.Current.LyricsEnabled || !Lyrics.HasContent)
+            return Rect.Empty;
+
+        // rotate like the visualizer on vertical taskbars
+        Lyrics.LayoutTransform = isVertical ? new System.Windows.Media.RotateTransform(90) : null;
+
+        int taskbarHeight = taskbarRect.Bottom - taskbarRect.Top;
+        int taskbarWidth = taskbarRect.Right - taskbarRect.Left;
+
+        int crossSize = isVertical ? taskbarWidth : taskbarHeight;
+        int crossOffset = isVertical ? 0 : -1;
+        int crossPos = (crossSize - (int)(Lyrics.Height * dpiScale)) / 2 + crossOffset;
+
+        // lyrics sit on the outer side of the visualizer chain: [lyrics][viz][widget]
+        // or [widget][viz][lyrics]; when the visualizer is disabled, lyrics takes its slot
+        double widgetPrimaryStart = isVertical ? Canvas.GetTop(Widget) : Canvas.GetLeft(Widget);
+        bool onStartSide = SettingsManager.Current.TaskbarVisualizerPosition == 0;
+
+        int lyrWidth = (int)(Lyrics.Width * dpiScale);
+        bool vizEnabled = SettingsManager.Current.TaskbarVisualizerEnabled;
+        int widgetExtent = (int)(Widget.Width * dpiScale);
+
+        int primaryPos;
+        if (onStartSide)
+        {
+            int vizSlot = vizEnabled ? (int)(TaskbarVisualizer.Width * dpiScale) + 4 : 0;
+            primaryPos = (int)(widgetPrimaryStart * dpiScale) - 4 - vizSlot - lyrWidth;
+        }
+        else
+        {
+            int vizSlot = vizEnabled ? (int)(TaskbarVisualizer.Width * dpiScale) : 0;
+            primaryPos = (int)(widgetPrimaryStart * dpiScale) + widgetExtent + vizSlot + 4;
+        }
+
+        Canvas.SetLeft(Lyrics, (isVertical ? crossPos : primaryPos) / dpiScale);
+        Canvas.SetTop(Lyrics, (isVertical ? primaryPos : crossPos) / dpiScale);
+
+        double rectW = isVertical ? Lyrics.Height * dpiScale : Lyrics.Width * dpiScale;
+        double rectH = isVertical ? Lyrics.Width * dpiScale : Lyrics.Height * dpiScale;
+        return new Rect(Canvas.GetLeft(Lyrics) * dpiScale, Canvas.GetTop(Lyrics) * dpiScale, rectW, rectH);
+    }
+
     public void UpdateUi(string title, string artist, BitmapImage? icon, GlobalSystemMediaTransportControlsSessionPlaybackStatus? playbackStatus, GlobalSystemMediaTransportControlsSessionPlaybackControls? playbackControls = null)
     {
         // Check premium status - hide widget if not unlocked
@@ -747,10 +808,7 @@ on_error:
 
                         if (_lastPlaybackStatus != GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
                         {
-                            Dispatcher.Invoke(() =>
-                            {
-                                Visibility = Visibility.Collapsed;
-                            });
+                            Dispatcher.Invoke(Widget.SlideOutThenCollapse);
                         }
                     };
 

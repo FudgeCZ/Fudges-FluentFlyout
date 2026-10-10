@@ -300,6 +300,72 @@ public partial class UserSettings : ObservableObject
     public partial bool LockKeysAnimated { get; set; }
 
     /// <summary>
+    /// Receive music streamed from the Phone Music Listener Android app and publish it as a system media session
+    /// </summary>
+    [ObservableProperty]
+    public partial bool PhoneReceiverEnabled { get; set; }
+
+    /// <summary>
+    /// TCP port the phone sender connects to (1024..65535)
+    /// </summary>
+    [ObservableProperty]
+    public partial int PhoneReceiverPort { get; set; }
+
+    /// <summary>
+    /// Answer the phone's discovery broadcast (UDP 58711)
+    /// </summary>
+    [ObservableProperty]
+    public partial bool PhoneReceiverDiscovery { get; set; }
+
+    /// <summary>
+    /// Mix phone music + microphone into VB-Cable for call apps
+    /// </summary>
+    [ObservableProperty]
+    public partial bool PhoneReceiverVbCableMix { get; set; }
+
+    /// <summary>
+    /// Show shuffle and repeat buttons in the media flyout (order: shuffle, back, play, next, repeat)
+    /// </summary>
+    [ObservableProperty]
+    public partial bool MediaFlyoutShuffleRepeatEnabled { get; set; }
+
+    /// <summary>
+    /// Show shuffle and repeat buttons on the taskbar widget
+    /// </summary>
+    [ObservableProperty]
+    public partial bool TaskbarWidgetShuffleRepeatEnabled { get; set; }
+
+    /// <summary>
+    /// Show the playback time (2:10 / 3:42) on the taskbar widget
+    /// </summary>
+    [ObservableProperty]
+    public partial bool TaskbarWidgetTimeEnabled { get; set; }
+
+    /// <summary>
+    /// Control YouTube Music's shuffle and repeat through its API Server plugin
+    /// </summary>
+    [ObservableProperty]
+    public partial bool YtmBridgeEnabled { get; set; }
+
+    /// <summary>
+    /// Port of the YouTube Music API Server plugin (default 26538)
+    /// </summary>
+    [ObservableProperty]
+    public partial int YtmBridgePort { get; set; }
+
+    /// <summary>
+    /// Stable client id used for the YT Music API Server auth dialog
+    /// </summary>
+    [ObservableProperty]
+    public partial string YtmBridgeClientId { get; set; } = "";
+
+    /// <summary>
+    /// Persisted access token from the YT Music API Server
+    /// </summary>
+    [ObservableProperty]
+    public partial string YtmBridgeToken { get; set; } = "";
+
+    /// <summary>
     /// Show LockKeys flyout when the Insert key is pressed
     /// </summary>
     [ObservableProperty]
@@ -568,6 +634,57 @@ public partial class UserSettings : ObservableObject
     public partial int TaskbarVisualizerBarCount { get; set; }
 
     /// <summary>
+    /// Friendly name of the app whose media session wins over the focused session
+    /// (e.g. "YouTube Music"). Empty = follow the focused session.
+    /// </summary>
+    [ObservableProperty]
+    public partial string MediaSessionPriorityApp { get; set; }
+
+    /// <summary>
+    /// The length (width) of the taskbar visualizer in pixels, from 40 to 300. Default is 84.
+    /// </summary>
+    [ObservableProperty]
+    public partial int TaskbarVisualizerLength { get; set; }
+
+    /// <summary>
+    /// Whether the taskbar lyrics widget is enabled. It only shows when synced/plain lyrics
+    /// are found for the current track.
+    /// </summary>
+    [ObservableProperty]
+    public partial bool LyricsEnabled { get; set; }
+
+    /// <summary>
+    /// Main lyrics provider: 0 = LRCLIB, 1 = Musixmatch.
+    /// </summary>
+    [ObservableProperty]
+    public partial int LyricsProvider { get; set; }
+
+    /// <summary>
+    /// Width of the taskbar lyrics widget in pixels, from 60 to 400. Default is 200.
+    /// </summary>
+    [ObservableProperty]
+    public partial int LyricsWidth { get; set; }
+
+    /// <summary>
+    /// Lyrics sync offset in milliseconds, from -5000 to 5000.
+    /// </summary>
+    [ObservableProperty]
+    public partial int LyricsOffsetMs { get; set; }
+
+    /// <summary>
+    /// Seconds after which the lyrics widget fades out while playback is paused.
+    /// 0 disables auto-hide.
+    /// </summary>
+    [ObservableProperty]
+    public partial int LyricsHidePausedAfterSeconds { get; set; }
+
+    /// <summary>
+    /// Genius API access token (api.genius.com). Empty = LyricsGenius provider disabled.
+    /// </summary>
+    [ObservableProperty]
+    public partial string LyricsGeniusToken { get; set; }
+
+    /// <summary>
     /// Whether the visualizer should be symmetrical/mirrored.
     /// </summary>
     [ObservableProperty]
@@ -770,6 +887,14 @@ public partial class UserSettings : ObservableObject
         TaskbarVisualizerPosition = 1;
         TaskbarVisualizerClickable = true;
         TaskbarVisualizerBarCount = 10;
+        TaskbarVisualizerLength = 84;
+        MediaSessionPriorityApp = "";
+        LyricsEnabled = true;
+        LyricsProvider = 0;
+        LyricsWidth = 200;
+        LyricsOffsetMs = 0;
+        LyricsHidePausedAfterSeconds = 15;
+        LyricsGeniusToken = "";
         TaskbarVisualizerCenteredBars = false;
         TaskbarVisualizerBaseline = false;
         TaskbarVisualizerAudioSensitivity = 2;
@@ -789,6 +914,17 @@ public partial class UserSettings : ObservableObject
         AnonymousTelemetryAllowed = true;
         AllowedApps = [];
         BlockedApps = [];
+        PhoneReceiverEnabled = true;
+        PhoneReceiverPort = 58710;
+        PhoneReceiverDiscovery = true;
+        PhoneReceiverVbCableMix = false;
+        MediaFlyoutShuffleRepeatEnabled = true;
+        TaskbarWidgetShuffleRepeatEnabled = false;
+        TaskbarWidgetTimeEnabled = false;
+        YtmBridgeEnabled = true;
+        YtmBridgePort = 26538;
+        YtmBridgeClientId = $"fluentflyout-{Random.Shared.Next(100000, 999999)}";
+        YtmBridgeToken = "";
 
         PropertyChanged += OnPropertyChangedSaveSettings;
     }
@@ -882,6 +1018,53 @@ public partial class UserSettings : ObservableObject
     {
         if (oldValue == newValue || _initializing) return;
         WindowBlurHelper.AdjustBlurOpacityForAllWindows(newValue);
+    }
+
+    partial void OnPhoneReceiverEnabledChanged(bool oldValue, bool newValue)
+    {
+        if (oldValue == newValue || _initializing) return;
+        Classes.Services.Phone.PhoneReceiverService.Instance.ApplyFromSettings();
+    }
+
+    partial void OnPhoneReceiverPortChanged(int oldValue, int newValue)
+    {
+        if (oldValue == newValue || _initializing) return;
+        if (newValue is < 1024 or > 65535)
+        {
+            PhoneReceiverPort = oldValue;
+            return;
+        }
+        Classes.Services.Phone.PhoneReceiverService.Instance.ApplyFromSettings();
+    }
+
+    partial void OnPhoneReceiverDiscoveryChanged(bool oldValue, bool newValue)
+    {
+        if (oldValue == newValue || _initializing) return;
+        Classes.Services.Phone.PhoneReceiverService.Instance.ApplyFromSettings();
+    }
+
+    partial void OnPhoneReceiverVbCableMixChanged(bool oldValue, bool newValue)
+    {
+        if (oldValue == newValue || _initializing) return;
+        Classes.Services.Phone.PhoneReceiverService.Instance.ApplyFromSettings();
+    }
+
+    partial void OnMediaFlyoutShuffleRepeatEnabledChanged(bool oldValue, bool newValue)
+    {
+        if (oldValue == newValue || _initializing) return;
+        Application.Current?.Dispatcher?.Invoke(() => (Application.Current?.MainWindow as MainWindow)?.RefreshMediaUi());
+    }
+
+    partial void OnTaskbarWidgetShuffleRepeatEnabledChanged(bool oldValue, bool newValue)
+    {
+        if (oldValue == newValue || _initializing) return;
+        UpdateTaskbar();
+    }
+
+    partial void OnTaskbarWidgetTimeEnabledChanged(bool oldValue, bool newValue)
+    {
+        if (oldValue == newValue || _initializing) return;
+        UpdateTaskbar();
     }
 
     partial void OnTaskbarWidgetEnabledChanged(bool oldValue, bool newValue)
@@ -1005,6 +1188,38 @@ public partial class UserSettings : ObservableObject
     {
         if (oldValue == newValue || _initializing) return;
         Visualizer.ResizeBarList(newValue);
+    }
+
+    partial void OnTaskbarVisualizerLengthChanged(int oldValue, int newValue)
+    {
+        if (oldValue == newValue || _initializing) return;
+        UpdateTaskbar(); // control resizes itself + bitmap via PropertyChanged; this only repositions it
+    }
+
+    partial void OnLyricsEnabledChanged(bool oldValue, bool newValue)
+    {
+        if (oldValue == newValue || _initializing) return;
+        UpdateTaskbar();
+    }
+
+    partial void OnLyricsProviderChanged(int oldValue, int newValue)
+    {
+        if (oldValue == newValue || _initializing) return;
+        Classes.Lyrics.LyricsService.Instance.RefreshCurrentTrack();
+    }
+
+    partial void OnLyricsWidthChanged(int oldValue, int newValue)
+    {
+        if (oldValue == newValue || _initializing) return;
+        UpdateTaskbar();
+    }
+
+    partial void OnMediaSessionPriorityAppChanged(string oldValue, string newValue)
+    {
+        if (oldValue == newValue || _initializing) return;
+        MainWindow mainWindow = (MainWindow)Application.Current.MainWindow;
+        mainWindow.UpdateTaskbar();
+        mainWindow.RefreshMediaUi();
     }
 
     partial void OnTaskbarVisualizerBaselineChanged(bool oldValue, bool newValue)

@@ -120,9 +120,25 @@
                     </StackPanel>
                 </ui:CardControl.Header>
                 <StackPanel Orientation="Horizontal" Opacity="{Binding IsPremiumUnlocked, Converter={StaticResource BoolToFullHalfOpacityConverter}}" >
-                    <Slider Minimum="1" Maximum="20" Value="{Binding TaskbarVisualizerBarCount, Mode=TwoWay}" IsEnabled="{Binding IsPremiumUnlocked}" TickFrequency="1" IsSnapToTickEnabled="True" Width="150"
+                    <Slider Minimum="1" Maximum="64" Value="{Binding TaskbarVisualizerBarCount, Mode=TwoWay}" IsEnabled="{Binding IsPremiumUnlocked}" TickFrequency="1" IsSnapToTickEnabled="True" Width="150"
                             IsMoveToPointEnabled="True" />
                     <ui:TextBlock Text="{Binding TaskbarVisualizerBarCount}" Width="24" TextAlignment="Center" Margin="12,0,0,0" />
+                </StackPanel>
+            </ui:CardControl>
+
+            <ui:CardControl x:Name="TaskbarVisualizerLengthTitleCard" Tag="Indexable" Icon="{ui:SymbolIcon ArrowAutofitWidth24}" Margin="0,0,0,3">
+                <ui:CardControl.Header>
+                    <StackPanel Orientation="Vertical">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="Length" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                        </StackPanel>
+                        <TextBlock Text="Width of the visualizer, in pixels." FontSize="12" Opacity="0.5" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <StackPanel Orientation="Horizontal" Opacity="{Binding IsPremiumUnlocked, Converter={StaticResource BoolToFullHalfOpacityConverter}}" >
+                    <Slider Minimum="40" Maximum="300" Value="{Binding TaskbarVisualizerLength, Mode=TwoWay}" IsEnabled="{Binding IsPremiumUnlocked}" TickFrequency="2" IsSnapToTickEnabled="True" Width="150"
+                            IsMoveToPointEnabled="True" />
+                    <ui:TextBlock Text="{Binding TaskbarVisualizerLength}" Width="32" TextAlignment="Center" Margin="12,0,0,0" />
                 </StackPanel>
             </ui:CardControl>
 

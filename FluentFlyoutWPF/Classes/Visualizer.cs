@@ -22,7 +22,14 @@ namespace FluentFlyoutWPF.Classes
         // Keep at 2: only an exact 2:1 minification turns WPF's default Linear
         // filter into a true box average. Other factors discard the supersampling.
         private const int Supersample = 2;
-        private readonly int ImageWidth = 76 * Supersample;
+
+        // TaskbarVisualizerControl's Image has Margin="4,0", so the drawable content
+        // is the control length minus 8 (upstream default: 84 - 8 = 76).
+        private const int ControlHorizontalMargin = 8;
+        private const int MinContentWidth = 24;
+        private const int MaxContentWidth = 292;
+
+        private int ImageWidth = 76 * Supersample;
         private readonly int ImageHeight = 32 * Supersample;
         private readonly int BarSpacing = 2 * Supersample;
 
@@ -77,6 +84,7 @@ namespace FluentFlyoutWPF.Classes
 
         public Visualizer()
         {
+            ImageWidth = ContentWidthFromLength(SettingsManager.Current.TaskbarVisualizerLength);
             InitializeBitmap();
 
             _fftBuffer = new Complex[_fftLength];
@@ -199,6 +207,25 @@ namespace FluentFlyoutWPF.Classes
         {
             BarCount = newBarCount;
             _barValues = new float[BarCount];
+        }
+
+        private static int ContentWidthFromLength(int controlLength)
+        {
+            return Math.Clamp(controlLength - ControlHorizontalMargin, MinContentWidth, MaxContentWidth) * Supersample;
+        }
+
+        /// <summary>
+        /// Resizes the bitmap to match a new visualizer control length (recreating it;
+        /// the control must reassign its Image.Source afterwards).
+        /// </summary>
+        public void SetLength(int controlLength)
+        {
+            int newWidth = ContentWidthFromLength(controlLength);
+            if (newWidth == ImageWidth)
+                return;
+
+            ImageWidth = newWidth;
+            InitializeBitmap();
         }
 
         public void Start()
@@ -528,11 +555,19 @@ namespace FluentFlyoutWPF.Classes
             out int barWidth,
             out int offsetX)
         {
+            // when the bars can't fit at full spacing, compress the gaps first
+            // so high bar counts stay usable on short visualizer lengths
+            if (barCount + (barCount - 1) * spacing + 1 > imageWidth)
+            {
+                spacing = Math.Max(1, (imageWidth - 1 - barCount) / Math.Max(1, barCount - 1));
+            }
+
             int totalSpacing = (barCount - 1) * spacing;
 
             int availableWidth = imageWidth - totalSpacing - 1;
 
-            barWidth = availableWidth / barCount;
+            // still not fitting? clamp to 1px so bars stay visible (they overflow-clip in the control)
+            barWidth = Math.Max(1, availableWidth / barCount);
 
             int usedWidth = barWidth * barCount + totalSpacing;
 
@@ -598,7 +633,7 @@ namespace FluentFlyoutWPF.Classes
                 int row = y * stride;
                 float py = y + 0.5f;
 
-                for (int x = barX; x < barX + barWidth && x < ImageWidth; x++)
+                for (int x = barX; x < barX + barWidth && x < ImageWidth && x >= 0; x++)
                 {
                     int index = row + (x << 2); // x * 4 (bitshift faster)
                     if (index + 3 >= buffer.Length)

@@ -176,6 +176,20 @@
                 </StackPanel>
             </ui:CardControl>
 
+            <!-- media session priority -->
+            <TextBlock Text="Media session" FontSize="14" FontWeight="SemiBold" Margin="0,12,0,6" />
+            <ui:CardControl x:Name="MediaSessionPriorityCard" Tag="Indexable" Icon="{ui:SymbolIcon Pin24}" Margin="0,0,0,3">
+                <ui:CardControl.Header>
+                    <StackPanel Orientation="Vertical">
+                        <TextBlock Text="Priority media app" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                        <TextBlock Text="This app's playback wins over whatever window has focus (e.g. keep YouTube Music ahead of browser videos). Pick &quot;(none)&quot; to follow focus." FontSize="12" Opacity="0.5" TextWrapping="Wrap" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <ComboBox x:Name="PriorityComboBox" MinWidth="170" Style="{StaticResource DefaultComboBoxStyle}"
+                          DropDownOpened="PriorityComboBox_DropDownOpened"
+                          SelectionChanged="PriorityComboBox_SelectionChanged" />
+            </ui:CardControl>
+
             <!-- update section -->
             <TextBlock Text="{DynamicResource UpdatesSectionTitle}" FontSize="14" FontWeight="SemiBold" Margin="0,12,0,6" />
             <ui:CardControl x:Name="ShowUpdateNotificationsTitleCard" Tag="Indexable" Margin="0,0,0,36" >
@@ -183,6 +197,66 @@
                     <TextBlock Text="{DynamicResource ShowUpdateNotificationsTitle}" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
                 </ui:CardControl.Header>
                 <ui:ToggleSwitch IsChecked="{Binding ShowUpdateNotifications, Mode=TwoWay}" />
+            </ui:CardControl>
+
+            <!-- phone receiver section -->
+            <TextBlock Text="Phone receiver" FontSize="14" FontWeight="SemiBold" Margin="0,12,0,6" />
+            <ui:CardControl x:Name="PhoneReceiverCard" Tag="Indexable" Icon="{ui:SymbolIcon Phone24}" Margin="0,0,0,3">
+                <ui:CardControl.Header>
+                    <StackPanel Orientation="Vertical">
+                        <TextBlock Text="Receive music from the Phone Music Listener app" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                        <TextBlock Text="Streams your Android phone's audio to this PC and shows it as a media session in the flyout and taskbar widget" FontSize="12" Opacity="0.5" TextWrapping="Wrap" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <ui:ToggleSwitch IsChecked="{Binding PhoneReceiverEnabled, Mode=TwoWay}" />
+            </ui:CardControl>
+            <ui:CardControl x:Name="PhoneReceiverPortCard" Tag="Indexable" Icon="{ui:SymbolIcon PlugConnected24}" Margin="0,0,0,3">
+                <ui:CardControl.Header>
+                    <StackPanel Orientation="Vertical">
+                        <TextBlock Text="Connection port" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                        <TextBlock Text="Must match the port in the phone app (default 58710)" FontSize="12" Opacity="0.5" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <ui:TextBox Text="{Binding PhoneReceiverPort, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Width="120" />
+            </ui:CardControl>
+            <ui:CardControl x:Name="PhoneReceiverDiscoveryCard" Tag="Indexable" Icon="{ui:SymbolIcon Wifi124}" Margin="0,0,0,3">
+                <ui:CardControl.Header>
+                    <StackPanel Orientation="Vertical">
+                        <TextBlock Text="Discovery responder" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                        <TextBlock Text="Lets the phone app find this PC with its Discover button (UDP 58711)" FontSize="12" Opacity="0.5" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <ui:ToggleSwitch IsChecked="{Binding PhoneReceiverDiscovery, Mode=TwoWay}" />
+            </ui:CardControl>
+            <ui:CardControl x:Name="PhoneReceiverVbCableCard" Tag="Indexable" Icon="{ui:SymbolIcon Mic24}" Margin="0,0,0,12">
+                <ui:CardControl.Header>
+                    <StackPanel Orientation="Vertical">
+                        <TextBlock Text="Mix phone music + microphone into VB-Cable" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                        <TextBlock Text="For calls: Discord/Zoom can use CABLE Output as a microphone with music and voice combined. Requires VB-Audio Virtual Cable." FontSize="12" Opacity="0.5" TextWrapping="Wrap" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <ui:ToggleSwitch IsChecked="{Binding PhoneReceiverVbCableMix, Mode=TwoWay}" />
+            </ui:CardControl>
+
+            <!-- YouTube Music bridge section -->
+            <TextBlock Text="YouTube Music" FontSize="14" FontWeight="SemiBold" Margin="0,12,0,6" />
+            <ui:CardControl x:Name="YtmBridgeCard" Tag="Indexable" Icon="{ui:SymbolIcon MusicNote220}" Margin="0,0,0,3">
+                <ui:CardControl.Header>
+                    <StackPanel Orientation="Vertical">
+                        <TextBlock Text="Shuffle and repeat control for YouTube Music" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                        <TextBlock Text="Routes the shuffle and repeat buttons to the YouTube Music desktop app (Pear/th-ch), which does not accept these commands over system media controls. Enable the 'API Server' plugin in the app's settings and approve the Allow dialog once." FontSize="12" Opacity="0.5" TextWrapping="Wrap" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <ui:ToggleSwitch IsChecked="{Binding YtmBridgeEnabled, Mode=TwoWay}" />
+            </ui:CardControl>
+            <ui:CardControl x:Name="YtmBridgePortCard" Tag="Indexable" Icon="{ui:SymbolIcon PlugConnected24}" Margin="0,0,0,3">
+                <ui:CardControl.Header>
+                    <StackPanel Orientation="Vertical">
+                        <TextBlock Text="API Server port" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                        <TextBlock Text="Must match the port in the API Server plugin settings (default 26538)" FontSize="12" Opacity="0.5" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <ui:TextBox Text="{Binding YtmBridgePort, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Width="120" />
             </ui:CardControl>
 
             <!-- app filtering -->

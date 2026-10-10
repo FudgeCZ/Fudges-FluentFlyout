@@ -1,0 +1,23 @@
+<UserControl x:Class="FluentFlyout.Controls.TaskbarLyricsControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+             mc:Ignorable="d"
+             Height="40" Width="200"
+             TextOptions.TextRenderingMode="ClearType" TextOptions.TextFormattingMode="Ideal"
+             HorizontalAlignment="Center" VerticalAlignment="Center">
+    <Grid Name="Root" Visibility="Collapsed">
+        <Border Name="ClipBorder" CornerRadius="6" ClipToBounds="True">
+            <Canvas x:Name="LinesCanvas">
+                <Canvas.RenderTransform>
+                    <TranslateTransform x:Name="ScrollTransform" />
+                </Canvas.RenderTransform>
+            </Canvas>
+        </Border>
+        <TextBlock x:Name="LoadingText" Text="" FontSize="12" Opacity="0.45"
+                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                   Visibility="Collapsed" />
+    </Grid>
+</UserControl>

@@ -190,7 +190,7 @@ public partial class TaskbarLyricsControl : UserControl
         _awaitingResult = true;
         _loadingShowTimer.Stop();
         _loadingShowTimer.Start();
-        _ = svc.FetchAsync(artist, title, duration);
+        _ = svc.FetchSmartAsync(artist, title, duration);
     }
 
     /// <summary>Instantly removes lyrics and collapses the widget (loading timers untouched).</summary>

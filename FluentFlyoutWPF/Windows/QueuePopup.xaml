@@ -1,0 +1,31 @@
+<Window x:Class="FluentFlyout.Windows.QueuePopup"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+        Title="QueuePopup" Width="320" Height="420"
+        WindowStyle="None" ResizeMode="NoResize" ShowInTaskbar="False"
+        AllowsTransparency="True" Background="Transparent"
+        TextOptions.TextRenderingMode="ClearType"
+        Deactivated="Window_Deactivated" Loaded="Window_Loaded">
+    <Border CornerRadius="10" Background="{DynamicResource ApplicationBackgroundBrush}"
+            BorderBrush="{DynamicResource CardStrokeColorDefaultSolidBrush}" BorderThickness="1">
+        <Border.Effect>
+            <DropShadowEffect BlurRadius="24" Opacity="0.4" ShadowDepth="4" />
+        </Border.Effect>
+        <Grid Margin="8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <StackPanel Orientation="Horizontal" Margin="8,6,8,8">
+                <ui:SymbolIcon Symbol="List20" FontSize="16" />
+                <TextBlock Text="Queue" FontSize="14" FontWeight="SemiBold" Margin="8,0,0,0" VerticalAlignment="Center" />
+                <TextBlock x:Name="NowPlayingText" FontSize="12" Opacity="0.6" Margin="12,1,0,0" VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis" MaxWidth="210" />
+            </StackPanel>
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="QueueList" />
+            </ScrollViewer>
+        </Grid>
+    </Border>
+</Window>

@@ -646,6 +646,12 @@ public partial class UserSettings : ObservableObject
     public partial bool TaskbarVisualizerBeatGlow { get; set; }
 
     /// <summary>
+    /// Visualizer drawing style: 0 = bars, 1 = bars with peak caps, 2 = wave.
+    /// </summary>
+    [ObservableProperty]
+    public partial int TaskbarVisualizerStyle { get; set; }
+
+    /// <summary>
     /// Friendly app name whose audio only the taskbar visualizer shows
     /// (WASAPI process loopback). Empty = whole system.
     /// </summary>
@@ -697,11 +703,6 @@ public partial class UserSettings : ObservableObject
     [ObservableProperty]
     public partial int LyricsHidePausedAfterSeconds { get; set; }
 
-    /// <summary>
-    /// Genius API access token (api.genius.com). Empty = LyricsGenius provider disabled.
-    /// </summary>
-    [ObservableProperty]
-    public partial string LyricsGeniusToken { get; set; }
 
     /// <summary>
     /// Cookie session imported from the YouTube Music desktop app, for the
@@ -920,10 +921,10 @@ public partial class UserSettings : ObservableObject
         LyricsWidth = 200;
         LyricsOffsetMs = 0;
         LyricsHidePausedAfterSeconds = 15;
-        LyricsGeniusToken = "";
         LyricsYtmSession = "";
         TaskbarWidgetProgressBarEnabled = true;
         TaskbarVisualizerBeatGlow = true;
+        TaskbarVisualizerStyle = 0;
         TaskbarVisualizerTargetApp = "";
         TaskbarVisualizerCenteredBars = false;
         TaskbarVisualizerBaseline = false;

@@ -1056,6 +1056,11 @@ public partial class TaskbarWidgetControl : UserControl
         scale.BeginAnimation(ScaleTransform.ScaleYProperty, anim);
     }
 
+    private void ContextMenuQueue_Click(object sender, RoutedEventArgs e)
+    {
+        FluentFlyout.Windows.QueuePopup.Toggle();
+    }
+
     // Event handlers for context menu items
     private async void ContextMenuMediaPlayer_Click(object sender, RoutedEventArgs e)
     {

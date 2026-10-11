@@ -132,6 +132,13 @@ public sealed class LyricsService
         NotifyChanged();
     }
 
+    /// <summary>
+    /// Convenience entry used by the widget: main provider from settings with
+    /// per-track winner memory and automatic fallback.
+    /// </summary>
+    public Task<LyricsResult?> FetchSmartAsync(string artist, string title, TimeSpan duration) =>
+        FetchWithMemoryAsync(artist, title, duration, SettingsManager.Current.LyricsProvider);
+
     /// <summary>Clears the current lyrics and refetches (provider switch, cache invalidation).</summary>
     public void RefreshCurrentTrack()
     {
@@ -151,6 +158,130 @@ public sealed class LyricsService
     /// the request identity (staleness check); <paramref name="providerCacheKey"/> is the
     /// per-provider cache entry.
     /// </summary>
+    /// <summary>
+    /// Fetches lyrics, preferring the provider that previously won for this track
+    /// (per-track provider memory, persisted in winners.json).
+    /// </summary>
+    public async Task<LyricsResult?> FetchWithMemoryAsync(string artist, string title, TimeSpan duration, int mainProvider)
+    {
+        int? winner = GetWinner(artist, title, duration);
+        var order = new List<int> { mainProvider };
+        order.AddRange(LyricsProviders.All().Where(p => p != mainProvider));
+
+        if (winner.HasValue && winner.Value != mainProvider)
+        {
+            order.Remove(winner.Value);
+            order.Insert(0, winner.Value); // remembered winner goes first
+        }
+
+        foreach (int provider in order)
+        {
+            var result = await TryProviderAsync(artist, title, duration, provider);
+            if (result != null)
+            {
+                if (provider != winner)
+                    SetWinner(artist, title, duration, provider);
+                return result;
+            }
+        }
+        return null;
+    }
+
+    private async Task<LyricsResult?> TryProviderAsync(string artist, string title, TimeSpan duration, int provider)
+    {
+        string key = MakeKey(artist, title, duration);
+        string cacheKey = $"{key}|p{provider}";
+
+        if (_memoryCache.TryGetValue(cacheKey, out var cached) && cached != null)
+        {
+            if (_requestKey == cacheKey)
+                return cached;
+        }
+        else
+        {
+            var disk = LoadFromDisk(cacheKey);
+            if (disk != null)
+            {
+                _memoryCache[cacheKey] = disk;
+                if (CurrentKey == key && Current == null)
+                {
+                    Current = disk;
+                    NotifyChanged();
+                }
+                return disk;
+            }
+        }
+
+        _requestKey = cacheKey;
+        CurrentKey = key;
+        var result = await FetchLockedAsync(cacheKey, cacheKey, artist, title, duration, provider);
+        if (_requestKey != cacheKey)
+            return null;
+
+        if (result != null)
+        {
+            _memoryCache[cacheKey] = result;
+            Current = result;
+            NotifyChanged();
+        }
+        return result;
+    }
+
+    // --- per-track provider winners ---
+
+    private static string WinnersPath => Path.Combine(CacheDir, "winners.json");
+    private readonly Dictionary<string, int> _winners = [];
+    private bool _winnersLoaded;
+    private readonly object _winnersLock = new();
+
+    private int? GetWinner(string artist, string title, TimeSpan duration)
+    {
+        lock (_winnersLock)
+        {
+            EnsureWinnersLoaded();
+            return _winners.TryGetValue(MakeKey(artist, title, duration), out var v) ? v : null;
+        }
+    }
+
+    private void SetWinner(string artist, string title, TimeSpan duration, int provider)
+    {
+        lock (_winnersLock)
+        {
+            EnsureWinnersLoaded();
+            _winners[MakeKey(artist, title, duration)] = provider;
+            try
+            {
+                Directory.CreateDirectory(CacheDir);
+                File.WriteAllText(WinnersPath, JsonSerializer.Serialize(_winners, JsonOptions));
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug(ex, "Failed to save lyrics winners");
+            }
+        }
+    }
+
+    private void EnsureWinnersLoaded()
+    {
+        if (_winnersLoaded)
+            return;
+        _winnersLoaded = true;
+        try
+        {
+            if (File.Exists(WinnersPath))
+            {
+                var data = JsonSerializer.Deserialize<Dictionary<string, int>>(File.ReadAllText(WinnersPath), JsonOptions);
+                if (data != null)
+                    foreach (var kv in data)
+                        _winners[kv.Key] = kv.Value;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed to load lyrics winners");
+        }
+    }
+
     private async Task<LyricsResult?> FetchLockedAsync(string mainCacheKey, string providerCacheKey, string artist, string title, TimeSpan duration, int provider)
     {
         await _fetchLock.WaitAsync();
@@ -169,7 +300,6 @@ public sealed class LyricsService
             LyricsResult? result = provider switch
             {
                 LyricsProviders.Musixmatch => await MusixmatchFetchAsync(artist, cleanTitle, duration),
-                LyricsProviders.Genius => await GeniusFetchAsync(artist, cleanTitle),
                 LyricsProviders.YouTubeMusic => await YouTubeMusicFetchAsync(artist, cleanTitle),
                 _ => await LrcLibFetchAsync(artist, cleanTitle, duration),
             };
@@ -331,107 +461,6 @@ public sealed class LyricsService
         {
             // malformed response handled as "no lyrics"
         }
-        return null;
-    }
-
-    // --- LyricsGenius (needs an API access token in Settings → Lyrics) ---
-
-    private async Task<LyricsResult?> GeniusFetchAsync(string artist, string title)
-    {
-        var token = SettingsManager.Current.LyricsGeniusToken;
-        if (string.IsNullOrWhiteSpace(token))
-            return null; // no token configured — provider disabled
-
-        try
-        {
-            // 1) search for the song
-            string query = $"https://api.genius.com/search?q={Uri.EscapeDataString(artist + " " + title)}";
-            using var search = new HttpRequestMessage(HttpMethod.Get, query);
-            search.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
-            using var searchResp = await _http.SendAsync(search);
-            if (!searchResp.IsSuccessStatusCode)
-                return null;
-
-            string? songUrl;
-            using (var stream = await searchResp.Content.ReadAsStreamAsync())
-            using (var doc = await JsonDocument.ParseAsync(stream))
-            {
-                songUrl = doc.RootElement
-                    .GetProperty("response").GetProperty("hits").EnumerateArray()
-                    .Select(h => h.GetProperty("result"))
-                    .Where(r => r.TryGetProperty("url", out var u) && u.ValueKind == JsonValueKind.String)
-                    .Select(r => r.GetProperty("url").GetString())
-                    .FirstOrDefault();
-            }
-
-            if (string.IsNullOrWhiteSpace(songUrl))
-                return null;
-
-            // 2) the Genius API doesn't serve lyric text — pull the public song page
-            using var pageResp = await _http.GetAsync(songUrl);
-            if (!pageResp.IsSuccessStatusCode)
-                return null;
-
-            string html = await pageResp.Content.ReadAsStringAsync();
-            string? lyrics = ExtractGeniusLyrics(html);
-            if (string.IsNullOrWhiteSpace(lyrics))
-                return null;
-
-            var lines = lyrics.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Select(t => new LyricLine(default, t)).ToList();
-            return lines.Count > 0 ? new LyricsResult(LyricsProviders.Name(LyricsProviders.Genius), false, lines) : null;
-        }
-        catch (Exception ex)
-        {
-            Logger.Debug(ex, "Genius fetch failed");
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Extracts lyric text from a Genius song page. Tries the rendered
-    /// Lyrics__Container blocks first, then the __NEXT_DATA__ JSON payload.
-    /// </summary>
-    private static string? ExtractGeniusLyrics(string html)
-    {
-        string? ExtractContainer(string block)
-        {
-            string text = System.Text.RegularExpressions.Regex.Replace(block, @"<br\s*/?>", "\n");
-            text = System.Text.RegularExpressions.Regex.Replace(text, @"<[^>]+>", "");
-            text = System.Net.WebUtility.HtmlDecode(text);
-            return text.Trim();
-        }
-
-        // old layout: <div class="Lyrics__Container">…</div> (non-nested, lazy match)
-        var containerMatches = System.Text.RegularExpressions.Regex.Matches(
-            html, @"<div class=""Lyrics__Container[^""]*""[^>]*>(.*?)</div>",
-            System.Text.RegularExpressions.RegexOptions.Singleline);
-        if (containerMatches.Count > 0)
-        {
-            string lyrics = string.Join("\n", containerMatches.Select(m => ExtractContainer(m.Groups[1].Value))
-                .Where(t => t.Length > 0));
-            if (lyrics.Length > 40)
-                return lyrics;
-        }
-
-        // new layout: lyrics embedded as a JSON string inside __NEXT_DATA__
-        int idx = html.IndexOf("__NEXT_DATA__", StringComparison.Ordinal);
-        if (idx >= 0)
-        {
-            var match = System.Text.RegularExpressions.Regex.Match(
-                html[idx..], @"""lyrics"":\s*""((?:[^""\\]|\\.)*)""",
-                System.Text.RegularExpressions.RegexOptions.Singleline);
-            if (match.Success)
-            {
-                string raw = match.Groups[1].Value
-                    .Replace("\\n", "\n").Replace("\\\"", "\"").Replace("\\\\", "\\");
-                string text = System.Text.RegularExpressions.Regex.Replace(raw, @"<[^>]+>", "");
-                text = System.Net.WebUtility.HtmlDecode(text).Trim();
-                if (text.Length > 40)
-                    return text;
-            }
-        }
-
         return null;
     }
 
@@ -676,6 +705,11 @@ public sealed class LyricsService
             Logger.Warn(ex, "Failed to clear lyrics cache");
         }
         Instance._memoryCache.Clear();
+        lock (Instance._winnersLock)
+        {
+            Instance._winners.Clear();
+        }
+        try { File.Delete(WinnersPath); } catch { /* best effort */ }
         lock (Instance._offsets)
         {
             Instance._offsets.Clear();

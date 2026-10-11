@@ -563,7 +563,71 @@ namespace FluentFlyoutWPF.Classes
             }, System.Windows.Threading.DispatcherPriority.Render);
         }
 
+        private static float[]? _peakValues; // falling peak caps for the Peaks style
+
         private unsafe void DrawBars(int stride, Span<byte> buffer)
+        {
+            int style = SettingsManager.Current.TaskbarVisualizerStyle;
+            if (style == 2)
+            {
+                DrawWave(stride, buffer);
+                return;
+            }
+            DrawColumnBars(stride, buffer, drawPeaks: style == 1);
+        }
+
+        /// <summary>Smooth interpolated wave: per-column fill from baseline to the bar curve.</summary>
+        private unsafe void DrawWave(int stride, Span<byte> buffer)
+        {
+            SolidColorBrush brush = BitmapHelper.SavedDominantColors.Count > 0
+                ? BitmapHelper.SavedDominantColors.Last()
+                : (SolidColorBrush)Application.Current.TryFindResource("MicaWPF.Brushes.SystemAccentColorTertiary");
+            byte b = brush.Color.B, g = brush.Color.G, r = brush.Color.R;
+
+            bool centered = SettingsManager.Current.TaskbarVisualizerCenteredBars;
+            int baseline = SettingsManager.Current.TaskbarVisualizerBaseline ? Supersample * 2 : 0;
+            int centerY = ImageHeight / 2;
+
+            float thickness = 3f * Supersample; // curve line thickness in px
+            float half = thickness / 2f;
+
+            for (int x = 0; x < ImageWidth; x++)
+            {
+                // bar-space position across the drawable width
+                float t = (float)x / (ImageWidth - 1) * (BarCount - 1);
+                int i = (int)t;
+                if (i >= BarCount - 1) i = BarCount - 2;
+                float frac = t - i;
+                float value = (_barValues[i] * (1 - frac) + _barValues[i + 1] * frac);
+                value = Math.Clamp(value, 0f, 1f);
+                int height = (int)(value * (ImageHeight - baseline * 2));
+
+                int y0, y1;
+                if (centered)
+                {
+                    y0 = centerY - height / 2 - (int)half;
+                    y1 = centerY + height / 2 + (int)half;
+                }
+                else
+                {
+                    y0 = ImageHeight - baseline - height - (int)half;
+                    y1 = ImageHeight - baseline;
+                }
+
+                for (int y = Math.Max(0, y0); y < Math.Min(ImageHeight, y1); y++)
+                {
+                    // AA on the horizontal edges of the line
+                    float edge = Math.Min(y - Math.Max(0, y0), Math.Min(ImageHeight - 1, y1 - 1) - y);
+                    byte a = edge < 1 ? (byte)(255 * Math.Clamp(edge, 0f, 1f)) : (byte)255;
+                    int index = y * stride + (x << 2);
+                    if (index + 3 >= buffer.Length) continue;
+                    WritePixel(buffer, index, b, g, r, a);
+                }
+            }
+        }
+
+        /// <summary>Classic bars, optionally with falling peak caps.</summary>
+        private unsafe void DrawColumnBars(int stride, Span<byte> buffer, bool drawPeaks)
         {
             // Resolve brush once 
             SolidColorBrush brush = BitmapHelper.SavedDominantColors.Count > 0
@@ -613,6 +677,40 @@ namespace FluentFlyoutWPF.Classes
                     centeredBars,
                     radius, radiusSq, invAA,
                     b, g, r);
+            }
+
+            if (!drawPeaks)
+                return;
+
+            // falling peak caps
+            if (_peakValues == null || _peakValues.Length != BarCount)
+                _peakValues = new float[BarCount];
+
+            for (int i = 0; i < BarCount; i++)
+            {
+                float peak = Math.Max(_peakValues[i] * 0.985f, _barValues[i]);
+                _peakValues[i] = peak;
+                if (peak < 0.01f) continue;
+
+                int barX = offsetX + i * (barWidth + BarSpacing);
+
+                int capHeight = (int)(Math.Clamp(peak, 0f, 1f) * (ImageHeight - barBaseline * 2));
+                int capY;
+                if (centeredBars)
+                    capY = centerY - capHeight / 2;
+                else
+                    capY = ImageHeight - barBaseline - capHeight;
+                capY = Math.Clamp(capY, 0, ImageHeight - 2);
+
+                for (int x = barX; x < barX + barWidth && x < ImageWidth && x >= 0; x++)
+                {
+                    for (int y = capY; y < capY + 2 * Supersample && y < ImageHeight; y++)
+                    {
+                        int index = y * stride + (x << 2);
+                        if (index + 3 >= buffer.Length) continue;
+                        WritePixel(buffer, index, b, g, r, 255);
+                    }
+                }
             }
         }
 

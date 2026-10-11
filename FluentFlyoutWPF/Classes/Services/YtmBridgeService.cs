@@ -121,6 +121,26 @@ public sealed class YtmBridgeService
         }
     }
 
+    private async Task<bool> PatchAsync(string path, object? body = null)
+    {
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Patch, path);
+            if (FluentFlyout.Classes.Settings.SettingsManager.Current.YtmBridgeToken is { } token)
+                req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            if (body != null) req.Content = JsonContent.Create(body);
+            using var resp = await Client.SendAsync(req);
+            _reachability = resp.IsSuccessStatusCode;
+            return resp.IsSuccessStatusCode;
+        }
+        catch (Exception ex)
+        {
+            _reachability = false;
+            Logger.Debug(ex, "YTM bridge PATCH {0} failed", path);
+            return false;
+        }
+    }
+
     /// <summary>Toggles shuffle in YT Music. Returns false when the plugin is unreachable.</summary>
     public async Task<bool> ToggleShuffleAsync()
     {
@@ -145,6 +165,53 @@ public sealed class YtmBridgeService
         Logger.Info("YTM bridge: repeat next mode");
         return await PostAsync("/api/v1/switch-repeat", new { iteration = 1 });
     }
+
+    /// <summary>One item of the YouTube Music queue.</summary>
+    public sealed record QueueItem(int Index, string Title, string Artist);
+
+    /// <summary>
+    /// Reads the current queue from the plugin. Returns null when the plugin is
+    /// unreachable; empty list when the queue is empty.
+    /// </summary>
+    public async Task<List<QueueItem>?> GetQueueAsync()
+    {
+        try
+        {
+            var json = await GetJsonAsync("/api/v1/queue");
+            if (json == null)
+                return null;
+
+            var items = new List<QueueItem>();
+            foreach (var wrapper in json.Value.EnumerateObject()
+                         .FirstOrDefault(p => p.Name == "items").Value.EnumerateArray())
+            {
+                try
+                {
+                    var r = wrapper.GetProperty("playlistPanelVideoWrapperRenderer")
+                        .GetProperty("primaryRenderer")
+                        .GetProperty("playlistPanelVideoRenderer");
+                    string title = r.GetProperty("title").GetProperty("runs")[0].GetString() ?? "";
+                    string artist = r.GetProperty("longBylineText").GetProperty("runs")[0].GetString() ?? "";
+                    int index = r.TryGetProperty("index", out var idx) ? idx.GetInt32() : items.Count;
+                    items.Add(new QueueItem(index, title, artist));
+                }
+                catch
+                {
+                    // malformed entry — skip
+                }
+            }
+            return items;
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "YTM bridge: queue read failed");
+            return null;
+        }
+    }
+
+    /// <summary>Jumps to a queue position (PATCH /api/v1/queue with index).</summary>
+    public Task<bool> JumpToAsync(int index) =>
+        PatchAsync("/api/v1/queue", new { index });
 
     /// <summary>Reads YT Music's shuffle/repeat state. Nulls when unreachable/unknown.</summary>
     public async Task<(bool? Shuffle, int? Repeat)> GetShuffleRepeatStateAsync()

@@ -21,18 +21,16 @@ public static class LyricsProviders
 {
     public const int LrcLib = 0;
     public const int Musixmatch = 1;
-    public const int Genius = 2;
-    public const int YouTubeMusic = 3;
+    public const int YouTubeMusic = 2;
 
     public static string Name(int provider) => provider switch
     {
         LrcLib => "LRCLIB",
         Musixmatch => "Musixmatch",
-        Genius => "LyricsGenius",
         YouTubeMusic => "YouTube Music",
         _ => "LRCLIB",
     };
 
     /// <summary>All providers in fallback order (main provider first, then the rest).</summary>
-    public static IEnumerable<int> All() => [LrcLib, YouTubeMusic, Musixmatch, Genius];
+    public static IEnumerable<int> All() => [LrcLib, YouTubeMusic, Musixmatch];
 }

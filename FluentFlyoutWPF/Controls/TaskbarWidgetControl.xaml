@@ -141,6 +141,11 @@
                         </ui:MenuItem.Icon>
                     </ui:MenuItem>
                     <Separator></Separator>
+                    <ui:MenuItem x:Name="ContextMenuQueue" Header="Queue" Click="ContextMenuQueue_Click">
+                        <ui:MenuItem.Icon>
+                            <ui:SymbolIcon Symbol="List20"/>
+                        </ui:MenuItem.Icon>
+                    </ui:MenuItem>
                     <ui:MenuItem x:Name="ContextMenuSettings" Header="{DynamicResource TrayIconLeftClickOption1}" Click="ContextMenuSettings_Click">
                         <ui:MenuItem.Icon>
                             <ui:SymbolIcon Symbol="Settings20"/>

@@ -154,6 +154,20 @@
                           SelectionChanged="TargetAppComboBox_SelectionChanged" />
             </ui:CardControl>
 
+            <ui:CardControl x:Name="TaskbarVisualizerStyleCard" Tag="Indexable" Icon="{ui:SymbolIcon DataBarVertical24}" Margin="0,0,0,3">
+                <ui:CardControl.Header>
+                    <StackPanel Orientation="Vertical">
+                        <TextBlock Text="Style" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                        <TextBlock Text="How the visualizer is drawn." FontSize="12" Opacity="0.5" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <ComboBox SelectedIndex="{Binding TaskbarVisualizerStyle}" Style="{StaticResource DefaultComboBoxStyle}">
+                    <ComboBoxItem Content="Bars" />
+                    <ComboBoxItem Content="Peaks" />
+                    <ComboBoxItem Content="Wave" />
+                </ComboBox>
+            </ui:CardControl>
+
             <ui:CardControl x:Name="TaskbarVisualizerBeatGlowTitleCard" Tag="Indexable" Icon="{ui:SymbolIcon Sparkle24}" Margin="0,0,0,3">
                 <ui:CardControl.Header>
                     <StackPanel Orientation="Vertical">

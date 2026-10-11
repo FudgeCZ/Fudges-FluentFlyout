@@ -704,6 +704,13 @@ public partial class UserSettings : ObservableObject
     public partial string LyricsGeniusToken { get; set; }
 
     /// <summary>
+    /// Cookie session imported from the YouTube Music desktop app, for the
+    /// YouTube Music lyrics provider. Empty = anonymous requests.
+    /// </summary>
+    [ObservableProperty]
+    public partial string LyricsYtmSession { get; set; }
+
+    /// <summary>
     /// Whether the visualizer should be symmetrical/mirrored.
     /// </summary>
     [ObservableProperty]
@@ -914,6 +921,7 @@ public partial class UserSettings : ObservableObject
         LyricsOffsetMs = 0;
         LyricsHidePausedAfterSeconds = 15;
         LyricsGeniusToken = "";
+        LyricsYtmSession = "";
         TaskbarWidgetProgressBarEnabled = true;
         TaskbarVisualizerBeatGlow = true;
         TaskbarVisualizerTargetApp = "";

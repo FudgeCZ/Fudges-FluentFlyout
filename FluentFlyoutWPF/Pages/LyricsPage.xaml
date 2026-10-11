@@ -59,6 +59,19 @@
             </ComboBox>
         </ui:CardControl>
 
+        <ui:CardControl x:Name="YtmSessionCard" Icon="{ui:SymbolIcon Key24}" Margin="0,0,0,3">
+            <ui:CardControl.Header>
+                <StackPanel Orientation="Vertical">
+                    <TextBlock Text="YouTube Music session" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                    <TextBlock Text="Import the login session from the YouTube Music desktop app so the YouTube Music provider can fetch account-gated lyrics. Close the YouTube Music app briefly during import." FontSize="12" Opacity="0.5" TextWrapping="Wrap" />
+                </StackPanel>
+            </ui:CardControl.Header>
+            <StackPanel Orientation="Horizontal">
+                <Button x:Name="ImportSessionButton" Content="Import session" Click="ImportSession_Click" Margin="0,0,8,0" />
+                <TextBlock x:Name="SessionStatusText" VerticalAlignment="Center" Opacity="0.6" FontSize="12" />
+            </StackPanel>
+        </ui:CardControl>
+
         <ui:CardControl x:Name="GeniusTokenCard" Icon="{ui:SymbolIcon Key24}" Margin="0,0,0,3">
             <ui:CardControl.Header>
                 <StackPanel Orientation="Vertical">

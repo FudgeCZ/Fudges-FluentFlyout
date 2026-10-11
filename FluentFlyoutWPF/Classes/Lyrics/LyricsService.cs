@@ -468,9 +468,20 @@ public sealed class LyricsService
     {
         try
         {
-            using var content = new StringContent(body, Encoding.UTF8, "application/json");
-            using var resp = await _http.PostAsync(
-                $"https://music.youtube.com/youtubei/v1/{endpoint}?prettyPrint=false", content);
+            using var req = new HttpRequestMessage(HttpMethod.Post,
+                $"https://music.youtube.com/youtubei/v1/{endpoint}?prettyPrint=false")
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json"),
+            };
+            var auth = YtmSession.GetAuth();
+            if (auth != null)
+            {
+                req.Headers.Add("Cookie", auth.Value.Cookie);
+                req.Headers.Add("Origin", "https://music.youtube.com");
+                if (auth.Value.Authorization.Length > 0)
+                    req.Headers.Add("Authorization", auth.Value.Authorization);
+            }
+            using var resp = await _http.SendAsync(req);
             if (!resp.IsSuccessStatusCode)
                 return null;
             return await resp.Content.ReadAsStringAsync();

@@ -74,8 +74,8 @@
         <ui:CardControl Icon="{ui:SymbolIcon ArrowAutofitWidth24}" Margin="0,0,0,3">
             <ui:CardControl.Header>
                 <StackPanel Orientation="Vertical">
-                    <TextBlock Text="Width" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
-                    <TextBlock Text="Width of the lyrics widget, in pixels." FontSize="12" Opacity="0.5" />
+                    <TextBlock Text="Minimum width" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                    <TextBlock Text="Smallest width of the lyrics widget, in pixels — it grows only as far as the lyrics need." FontSize="12" Opacity="0.5" />
                 </StackPanel>
             </ui:CardControl.Header>
             <StackPanel Orientation="Horizontal">

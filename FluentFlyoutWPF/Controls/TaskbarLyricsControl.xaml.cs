@@ -59,6 +59,7 @@ public partial class TaskbarLyricsControl : UserControl
     private bool _hiddenByPause;
     private int? _trackOffsetMs;   // per-track sync offset (mouse wheel), overrides the global one
     private DispatcherTimer? _offsetHintTimer;
+    private double _balancedRowTarget; // widest balanced row; one-row lines wider than this get force-split
 
     /// <summary>Whether the control currently has lyrics (or a search in progress) to display.</summary>
     public bool HasContent => Root.Visibility == Visibility.Visible && (_lines.Count > 0 || _loadingVisible);
@@ -328,8 +329,11 @@ public partial class TaskbarLyricsControl : UserControl
     /// <summary>
     /// Re-balances a lyric line that greedy-wraps to two rows: the text is re-split at
     /// the word boundary making both rows a similar width, instead of one long row
-    /// followed by a leftover word. Lines fitting one row (or needing 3+) keep the
-    /// greedy wrap. The original text rides in <see cref="FrameworkElement.Tag"/>.
+    /// followed by a leftover word. A one-row line wider than
+    /// <see cref="_balancedRowTarget"/> (the widest balanced row in the current lyrics)
+    /// is force-split too, so no single row stands out as much longer than the rest.
+    /// Lines needing 3+ rows keep the greedy wrap. The original text rides in
+    /// <see cref="FrameworkElement.Tag"/>.
     /// </summary>
     private void BalanceWrap(TextBlock tb)
     {
@@ -344,8 +348,17 @@ public partial class TaskbarLyricsControl : UserControl
             return;
 
         tb.Measure(new Size(ContentWidth, double.PositiveInfinity));
-        if ((int)Math.Round(tb.DesiredSize.Height / rowHeight) != 2)
-            return; // one row, or 3+ rows at the width cap — keep greedy
+        int rows = (int)Math.Round(tb.DesiredSize.Height / rowHeight);
+
+        bool forceSplit = false;
+        if (rows == 1 && _balancedRowTarget > 0)
+        {
+            tb.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            forceSplit = tb.DesiredSize.Width > _balancedRowTarget;
+        }
+
+        if (rows != 2 && !forceSplit)
+            return; // one row that is short enough, or 3+ rows at the width cap — keep greedy
 
         var probe = new TextBlock { FontSize = tb.FontSize, FontFamily = tb.FontFamily };
         string[] words = original.Split(' ');
@@ -381,34 +394,60 @@ public partial class TaskbarLyricsControl : UserControl
     /// </summary>
     private void ApplyWidthFromSetting()
     {
-        Width = SettingsManager.Current.LyricsWidth;
         if (_lines.Count == 0)
+        {
+            Width = Math.Clamp(SettingsManager.Current.LyricsWidth, 120, 400);
             return;
+        }
 
-        RelayoutCore();
-        AutoFitWidth();
+        AutoFitWidth(); // re-fits from scratch; the setting acts as the minimum
         ContentChanged?.Invoke();
     }
 
     /// <summary>
-    /// Widens the control until no lyric line wraps to more than 2 rows
-    /// (capped at 400 px). Keeps the LyricsWidth setting as the base width.
+    /// Sizes the strip to the smallest width where every line fits in at most two
+    /// (balanced) rows: a line contributes its single-row width or its best balanced
+    /// two-row split width — whichever is narrower — and the widest line wins. Long
+    /// single-row lines therefore wrap into two shorter balanced rows instead of
+    /// stretching the strip. Never narrower than the user's width setting (which acts
+    /// as the minimum), never wider than 400 px.
     /// </summary>
     private void AutoFitWidth()
     {
         if (_lines.Count == 0)
             return;
 
-        double rowHeight = MeasureRowHeight();
-        if (rowHeight <= 1 || MaxRowCount(rowHeight) <= 2)
-            return;
-
-        int guard = 0;
-        while (guard++ < 20 && Width < 400 && MaxRowCount(rowHeight) > 2)
+        var first = _lines[0].Block;
+        var probe = new TextBlock { FontSize = first.FontSize, FontFamily = first.FontFamily };
+        double required = 0;
+        foreach (var (tb, _, _, _) in _lines)
         {
-            Width = Math.Min(400, Width + 16);
-            RelayoutCore();
+            string original = tb.Tag as string ?? tb.Text;
+            probe.Text = original;
+            probe.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            double single = probe.DesiredSize.Width;
+            double best = single;
+
+            string[] words = original.Split(' ');
+            for (int i = 1; i < words.Length; i++)
+            {
+                probe.Text = string.Join(" ", words, 0, i);
+                probe.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                double w1 = probe.DesiredSize.Width;
+                probe.Text = string.Join(" ", words, i, words.Length - i);
+                probe.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                double w2 = probe.DesiredSize.Width;
+                best = Math.Min(best, Math.Max(w1, w2));
+            }
+
+            required = Math.Max(required, Math.Min(single, best));
         }
+
+        double floor = Math.Clamp(SettingsManager.Current.LyricsWidth, 120, 400);
+        // when the strip is pinned wide by the user's minimum, don't force extra wraps
+        _balancedRowTarget = floor > required + 28 ? double.MaxValue : required;
+        Width = Math.Clamp(required + 28, floor, 400); // +8 breathing over the content, +20 side margins
+        RelayoutCore();
     }
 
     private double MeasureRowHeight()
@@ -416,18 +455,6 @@ public partial class TaskbarLyricsControl : UserControl
         var probe = new TextBlock { Text = "Xg", FontSize = 12 };
         probe.Measure(new Size(1000, double.PositiveInfinity));
         return Math.Max(1, probe.DesiredSize.Height);
-    }
-
-    private int MaxRowCount(double rowHeight)
-    {
-        int max = 1;
-        foreach (var (tb, _, _, _) in _lines)
-        {
-            tb.Width = ContentWidth;
-            tb.Measure(new Size(ContentWidth, double.PositiveInfinity));
-            max = Math.Max(max, (int)Math.Round(tb.DesiredSize.Height / rowHeight));
-        }
-        return max;
     }
 
     private void RelayoutCore()

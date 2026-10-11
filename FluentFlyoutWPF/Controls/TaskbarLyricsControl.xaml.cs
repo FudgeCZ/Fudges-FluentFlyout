@@ -225,6 +225,9 @@ public partial class TaskbarLyricsControl : UserControl
             return;
         }
 
+        NLog.LogManager.GetCurrentClassLogger().Info(
+            "Lyrics SetClock: playing {0} -> {1}, hiddenByPause={2}, lines={3}",
+            _playing, playing, _hiddenByPause, _lines.Count);
         _playing = playing;
         if (playing)
         {
@@ -288,6 +291,7 @@ public partial class TaskbarLyricsControl : UserControl
                 RenderTransform = new ScaleTransform(1, 1),
             };
             Canvas.SetTop(tb, y);
+            Canvas.SetLeft(tb, LineBoxInset);
             LinesCanvas.Children.Add(tb);
 
             tb.Measure(new Size(ContentWidth, double.PositiveInfinity));
@@ -314,7 +318,10 @@ public partial class TaskbarLyricsControl : UserControl
     }
 
     /// <summary>Width available to a text line inside the control.</summary>
-    private double ContentWidth => Math.Max(40, Width - 16);
+    private double ContentWidth => Math.Max(40, Width - 20);
+
+    /// <summary>Horizontal inset that centers a ContentWidth-wide line box in the control.</summary>
+    private double LineBoxInset => (Width - ContentWidth) / 2;
 
     /// <summary>
     /// Resets the width to the user setting, then re-applies the 2-line auto-fit.
@@ -380,6 +387,7 @@ public partial class TaskbarLyricsControl : UserControl
             tb.Width = ContentWidth;
             tb.Measure(new Size(ContentWidth, double.PositiveInfinity));
             Canvas.SetTop(tb, y);
+            Canvas.SetLeft(tb, LineBoxInset);
             _lines[i] = (tb, y, tb.DesiredSize.Height, time);
             y += tb.DesiredSize.Height + LineGap;
         }
@@ -416,6 +424,7 @@ public partial class TaskbarLyricsControl : UserControl
         }
 
         // fade the widget out, then tear down (skipped if new lyrics arrived meanwhile)
+        _hiddenByPause = false;
         int gen = _generation;
         var fade = new DoubleAnimation(0, FadeDuration);
         fade.Completed += (_, _) =>
@@ -466,6 +475,11 @@ public partial class TaskbarLyricsControl : UserControl
 
     private void TickScroll()
     {
+        // self-heal: a resume whose playing transition was missed while hidden must
+        // still bring the strip back (the normal path is SetClock -> ShowFromPause)
+        if (_hiddenByPause && _playing && _lines.Count > 0)
+            ShowFromPause();
+
         if (_lines.Count == 0 || Root.Visibility != Visibility.Visible)
             return;
 
@@ -500,6 +514,7 @@ public partial class TaskbarLyricsControl : UserControl
 
     private void HideForPause()
     {
+        NLog.LogManager.GetCurrentClassLogger().Info("Lyrics HideForPause");
         _hiddenByPause = true;
         int gen = _generation;
         var fade = new DoubleAnimation(0, FadeDuration);
@@ -516,6 +531,7 @@ public partial class TaskbarLyricsControl : UserControl
 
     private void ShowFromPause()
     {
+        NLog.LogManager.GetCurrentClassLogger().Info("Lyrics ShowFromPause");
         _hiddenByPause = false;
         _pausedSince = _playing ? null : _pausedSince;
         Root.BeginAnimation(OpacityProperty, null);

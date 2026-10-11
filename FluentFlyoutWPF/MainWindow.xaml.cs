@@ -610,27 +610,54 @@ public partial class MainWindow : MicaWindow
     /// the playback clock. Positions are extrapolated in the control between pushes.
     /// Also drives the visualizer app gate.
     /// </summary>
-    private void UpdateLyricsWidget()
+    private async void UpdateLyricsWidget()
     {
         var lyrics = taskbarWindow?.Lyrics;
         if (lyrics == null) return;
 
         try
         {
-            if (GetActiveMediaSession() is not { } session) return;
+            if (GetActiveMediaSession() is not { } session)
+            {
+                LogLyricsHeartbeat("no session");
+                return;
+            }
 
             var info = session.ControlSession.GetPlaybackInfo();
-            if (info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed) return;
+            if (info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed)
+            {
+                LogLyricsHeartbeat($"closed ({session.Id})");
+                return;
+            }
 
             var mediaProps = TryGetMediaProperties(session.ControlSession);
-            if (mediaProps == null || string.IsNullOrWhiteSpace(mediaProps.Title)) return;
+            if (mediaProps == null || string.IsNullOrWhiteSpace(mediaProps.Title))
+            {
+                LogLyricsHeartbeat($"no props/title ({session.Id})");
+                return;
+            }
+
+            LogLyricsHeartbeat($"{info.PlaybackStatus} '{mediaProps.Title}'");
 
             NotifyLyricsTrackChanged(mediaProps.Title, mediaProps.Artist);
 
             // always feed the clock: it also drives the pause auto-hide
             var timeline = session.ControlSession.GetTimelineProperties();
-            lyrics.SetClock(timeline.Position, timeline.LastUpdatedTime.DateTime,
-                info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing);
+            bool playing = info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
+
+            // Chromium-hosted YT Music sessions (e.g. the Opera sidebar) update their SMTC
+            // status tens of seconds late, which kept the pause-hidden lyrics away long
+            // after an audible resume. The desktop app's own API server reports instantly,
+            // so for YT Music sessions it wins the playing flag — but only while it is
+            // actually playing the same track the session reports.
+            if (SettingsManager.Current.YtmBridgeEnabled && IsYtmSession(session))
+            {
+                var bridge = await GetBridgeSongCachedAsync();
+                if (bridge != null && TitlesMatch(bridge.Title, mediaProps.Title))
+                    playing = !bridge.IsPaused;
+            }
+
+            lyrics.SetClock(timeline.Position, timeline.LastUpdatedTime.DateTime, playing);
 
             UpdateVisualizerGate(mediaProps.Title, mediaProps.Artist,
                 info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing);
@@ -639,6 +666,27 @@ public partial class MainWindow : MicaWindow
         {
             Logger.Debug(ex, "Failed to update lyrics widget");
         }
+    }
+
+    private Classes.Services.YtmBridgeService.BridgeSong? _lastBridgeSong;
+    private DateTime _lastBridgeSongFetch = DateTime.MinValue;
+
+    /// <summary>Debounced (2 s) bridge song poll for the lyrics clock override.</summary>
+    private async Task<Classes.Services.YtmBridgeService.BridgeSong?> GetBridgeSongCachedAsync()
+    {
+        if (_lastBridgeSongFetch != DateTime.MinValue && (DateTime.Now - _lastBridgeSongFetch).TotalSeconds < 2)
+            return _lastBridgeSong;
+        _lastBridgeSongFetch = DateTime.Now;
+        _lastBridgeSong = await Classes.Services.YtmBridgeService.Instance.GetSongAsync();
+        return _lastBridgeSong;
+    }
+
+    /// <summary>Tolerant title comparison for bridge-vs-session identity (spacing ignored).</summary>
+    private static bool TitlesMatch(string a, string b)
+    {
+        string na = a.Replace(" ", "").ToLowerInvariant();
+        string nb = b.Replace(" ", "").ToLowerInvariant();
+        return na.Length > 0 && nb.Length > 0 && (na.Contains(nb, StringComparison.Ordinal) || nb.Contains(na, StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -692,6 +740,15 @@ public partial class MainWindow : MicaWindow
     }
 
     private string _lyricsTrackKey = ""; // track identity already pushed to the lyrics widget
+    private string _lastLyricsHeartbeat = ""; // last distinct heartbeat state, for change-only logging
+
+    /// <summary>Logs the lyrics heartbeat only when its state changes (NLog collapses repeats).</summary>
+    private void LogLyricsHeartbeat(string state)
+    {
+        if (state == _lastLyricsHeartbeat) return;
+        _lastLyricsHeartbeat = state;
+        Logger.Info("Lyrics heartbeat: {0}", state);
+    }
 
     public void RefreshMediaUi()
     {

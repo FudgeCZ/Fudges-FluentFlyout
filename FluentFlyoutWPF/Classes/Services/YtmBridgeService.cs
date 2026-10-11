@@ -147,8 +147,8 @@ public sealed class YtmBridgeService
     }
 
     /// <summary>Currently playing song from the bridge, for the lyrics provider's exact
-    /// videoId path. Nulls when unreachable/idle.</summary>
-    public sealed record BridgeSong(string VideoId, string Title, string Artist);
+    /// videoId path and the lag-free play state. Nulls when unreachable/idle.</summary>
+    public sealed record BridgeSong(string VideoId, string Title, string Artist, bool IsPaused);
 
     /// <summary>Reads the currently playing song (GET /api/v1/song). Null when idle or unreachable.</summary>
     public async Task<BridgeSong?> GetSongAsync()
@@ -161,8 +161,9 @@ public sealed class YtmBridgeService
             string? videoId = json.Value.TryGetProperty("videoId", out var vid) ? vid.GetString() : null;
             string? title = json.Value.TryGetProperty("title", out var t) ? t.GetString() : null;
             string? artist = json.Value.TryGetProperty("artist", out var a) ? a.GetString() : null;
+            bool isPaused = json.Value.TryGetProperty("isPaused", out var p) && p.ValueKind == JsonValueKind.True;
             if (string.IsNullOrEmpty(videoId)) return null;
-            return new BridgeSong(videoId, title ?? "", artist ?? "");
+            return new BridgeSong(videoId, title ?? "", artist ?? "", isPaused);
         }
         catch (Exception ex)
         {

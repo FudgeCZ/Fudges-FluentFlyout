@@ -290,10 +290,12 @@ public partial class TaskbarLyricsControl : UserControl
                 RenderTransformOrigin = new Point(0.5, 0.5),
                 RenderTransform = new ScaleTransform(1, 1),
             };
+            tb.Tag = line.Text; // original text, kept for re-balancing on width changes
             Canvas.SetTop(tb, y);
             Canvas.SetLeft(tb, LineBoxInset);
             LinesCanvas.Children.Add(tb);
 
+            BalanceWrap(tb);
             tb.Measure(new Size(ContentWidth, double.PositiveInfinity));
             _lines.Add((tb, y, tb.DesiredSize.Height, time));
             y += tb.DesiredSize.Height + LineGap;
@@ -322,6 +324,57 @@ public partial class TaskbarLyricsControl : UserControl
 
     /// <summary>Horizontal inset that centers a ContentWidth-wide line box in the control.</summary>
     private double LineBoxInset => (Width - ContentWidth) / 2;
+
+    /// <summary>
+    /// Re-balances a lyric line that greedy-wraps to two rows: the text is re-split at
+    /// the word boundary making both rows a similar width, instead of one long row
+    /// followed by a leftover word. Lines fitting one row (or needing 3+) keep the
+    /// greedy wrap. The original text rides in <see cref="FrameworkElement.Tag"/>.
+    /// </summary>
+    private void BalanceWrap(TextBlock tb)
+    {
+        string original = tb.Tag as string ?? tb.Text;
+        tb.Text = original;
+
+        if (!original.Contains(' ') || ContentWidth < 40)
+            return;
+
+        double rowHeight = MeasureRowHeight();
+        if (rowHeight <= 1)
+            return;
+
+        tb.Measure(new Size(ContentWidth, double.PositiveInfinity));
+        if ((int)Math.Round(tb.DesiredSize.Height / rowHeight) != 2)
+            return; // one row, or 3+ rows at the width cap — keep greedy
+
+        var probe = new TextBlock { FontSize = tb.FontSize, FontFamily = tb.FontFamily };
+        string[] words = original.Split(' ');
+        double best = double.MaxValue;
+        int bestSplit = -1;
+        for (int i = 1; i < words.Length; i++)
+        {
+            string left = string.Join(" ", words, 0, i);
+            string right = string.Join(" ", words, i, words.Length - i);
+            probe.Text = left;
+            probe.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            double w1 = probe.DesiredSize.Width;
+            probe.Text = right;
+            probe.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            double w2 = probe.DesiredSize.Width;
+            if (w1 > ContentWidth || w2 > ContentWidth)
+                continue; // that split would still wrap — not a two-row candidate
+            double worst = Math.Max(w1, w2);
+            if (worst < best)
+            {
+                best = worst;
+                bestSplit = i;
+            }
+        }
+
+        if (bestSplit > 0)
+            tb.Text = string.Join(" ", words, 0, bestSplit) + "\n"
+                + string.Join(" ", words, bestSplit, words.Length - bestSplit);
+    }
 
     /// <summary>
     /// Resets the width to the user setting, then re-applies the 2-line auto-fit.
@@ -385,6 +438,7 @@ public partial class TaskbarLyricsControl : UserControl
         {
             var (tb, _, _, time) = _lines[i];
             tb.Width = ContentWidth;
+            BalanceWrap(tb); // re-split two-row wraps for the new width
             tb.Measure(new Size(ContentWidth, double.PositiveInfinity));
             Canvas.SetTop(tb, y);
             Canvas.SetLeft(tb, LineBoxInset);

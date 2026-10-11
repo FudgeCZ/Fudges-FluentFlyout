@@ -150,7 +150,7 @@ public sealed class LyricsService
         if (parts.Length != 3)
             return;
 
-        _ = FetchAsync(parts[0], parts[1], TimeSpan.FromSeconds(double.Parse(parts[2], System.Globalization.CultureInfo.InvariantCulture)));
+        _ = FetchSmartAsync(parts[0], parts[1], TimeSpan.FromSeconds(double.Parse(parts[2], System.Globalization.CultureInfo.InvariantCulture)));
     }
 
     /// <summary>
@@ -159,73 +159,72 @@ public sealed class LyricsService
     /// per-provider cache entry.
     /// </summary>
     /// <summary>
-    /// Fetches lyrics, preferring the provider that previously won for this track
-    /// (per-track provider memory, persisted in winners.json).
+    /// Fetches lyrics with per-track winner memory: the provider that previously
+    /// won for this track is tried first, then the main provider, then the rest.
+    /// Always terminates with exactly one LyricsChanged notification.
     /// </summary>
     public async Task<LyricsResult?> FetchWithMemoryAsync(string artist, string title, TimeSpan duration, int mainProvider)
     {
+        string key = MakeKey(artist, title, duration);
+        _requestKey = key;
+        CurrentKey = key;
+        Current = null;
+
         int? winner = GetWinner(artist, title, duration);
         var order = new List<int> { mainProvider };
         order.AddRange(LyricsProviders.All().Where(p => p != mainProvider));
-
         if (winner.HasValue && winner.Value != mainProvider)
         {
             order.Remove(winner.Value);
-            order.Insert(0, winner.Value); // remembered winner goes first
+            order.Insert(0, winner.Value);
         }
 
         foreach (int provider in order)
         {
-            var result = await TryProviderAsync(artist, title, duration, provider);
+            var result = await TryProviderCachedAsync(key, artist, title, duration, provider);
+            if (_requestKey != key)
+                return null; // superseded by a newer track
+
             if (result != null)
             {
-                if (provider != winner)
+                if (winner != provider)
                     SetWinner(artist, title, duration, provider);
+                Current = result;
+                NotifyChanged();
                 return result;
             }
+        }
+
+        if (_requestKey == key)
+        {
+            Current = null;
+            NotifyChanged(); // terminal miss — the widget must hide
         }
         return null;
     }
 
-    private async Task<LyricsResult?> TryProviderAsync(string artist, string title, TimeSpan duration, int provider)
+    /// <summary>Per-provider lookup: memory cache, then disk cache, then network.</summary>
+    private async Task<LyricsResult?> TryProviderCachedAsync(string key, string artist, string title, TimeSpan duration, int provider)
     {
-        string key = MakeKey(artist, title, duration);
         string cacheKey = $"{key}|p{provider}";
 
         if (_memoryCache.TryGetValue(cacheKey, out var cached) && cached != null)
+            return cached;
+
+        var disk = LoadFromDisk(cacheKey);
+        if (disk != null)
         {
-            if (_requestKey == cacheKey)
-                return cached;
-        }
-        else
-        {
-            var disk = LoadFromDisk(cacheKey);
-            if (disk != null)
-            {
-                _memoryCache[cacheKey] = disk;
-                if (CurrentKey == key && Current == null)
-                {
-                    Current = disk;
-                    NotifyChanged();
-                }
-                return disk;
-            }
+            _memoryCache[cacheKey] = disk;
+            return disk;
         }
 
-        _requestKey = cacheKey;
-        CurrentKey = key;
-        var result = await FetchLockedAsync(cacheKey, cacheKey, artist, title, duration, provider);
-        if (_requestKey != cacheKey)
-            return null;
-
-        if (result != null)
-        {
-            _memoryCache[cacheKey] = result;
-            Current = result;
-            NotifyChanged();
-        }
-        return result;
+        var fetched = await FetchLockedAsync(key, cacheKey, artist, title, duration, provider);
+        if (fetched != null)
+            _memoryCache[cacheKey] = fetched;
+        return fetched;
     }
+
+
 
     // --- per-track provider winners ---
 
@@ -288,7 +287,7 @@ public sealed class LyricsService
         try
         {
             if (_requestKey != mainCacheKey)
-                return null;
+                return null; // superseded
 
             var disk = LoadFromDisk(providerCacheKey);
             if (disk != null)

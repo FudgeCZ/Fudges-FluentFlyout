@@ -55,6 +55,7 @@
                 <ComboBoxItem Content="LRCLIB" />
                 <ComboBoxItem Content="Musixmatch" />
                 <ComboBoxItem Content="LyricsGenius" />
+                <ComboBoxItem Content="YouTube Music" />
             </ComboBox>
         </ui:CardControl>
 

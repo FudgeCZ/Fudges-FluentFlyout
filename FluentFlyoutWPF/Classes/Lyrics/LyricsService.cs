@@ -170,6 +170,7 @@ public sealed class LyricsService
             {
                 LyricsProviders.Musixmatch => await MusixmatchFetchAsync(artist, cleanTitle, duration),
                 LyricsProviders.Genius => await GeniusFetchAsync(artist, cleanTitle),
+                LyricsProviders.YouTubeMusic => await YouTubeMusicFetchAsync(artist, cleanTitle),
                 _ => await LrcLibFetchAsync(artist, cleanTitle, duration),
             };
 
@@ -449,6 +450,149 @@ public sealed class LyricsService
             Logger.Debug(ex, $"Musixmatch {method} request failed");
             return null;
         }
+    }
+
+    // --- YouTube Music (Innertube web client; same flow as ytmusicapi.get_lyrics) ---
+
+    private const string InnertubeContext =
+        "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\",\"clientVersion\":\"1.20240401.01.00\",\"hl\":\"en\",\"gl\":\"US\"}}}";
+
+    /// <summary>Appends top-level fields to the Innertube context JSON.</summary>
+    private static string InnertubeBody(params (string Name, string JsonValue)[] fields)
+    {
+        string extra = string.Join(",", fields.Select(f => $"\"{f.Name}\":{f.JsonValue}"));
+        return InnertubeContext.Insert(InnertubeContext.Length - 1, "," + extra);
+    }
+
+    private async Task<string?> InnertubeCallAsync(string endpoint, string body)
+    {
+        try
+        {
+            using var content = new StringContent(body, Encoding.UTF8, "application/json");
+            using var resp = await _http.PostAsync(
+                $"https://music.youtube.com/youtubei/v1/{endpoint}?prettyPrint=false", content);
+            if (!resp.IsSuccessStatusCode)
+                return null;
+            return await resp.Content.ReadAsStringAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, $"Innertube {endpoint} request failed");
+            return null;
+        }
+    }
+
+    /// <summary>Depth-first walk for the first string value of a JSON key.</summary>
+    private static string? FindStringValue(JsonElement element, string key, string? startsWith = null)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in element.EnumerateObject())
+            {
+                if (prop.NameEquals(key) && prop.Value.ValueKind == JsonValueKind.String)
+                {
+                    var v = prop.Value.GetString();
+                    if (v != null && (startsWith == null || v.StartsWith(startsWith, StringComparison.Ordinal)))
+                        return v;
+                }
+                var nested = FindStringValue(prop.Value, key, startsWith);
+                if (nested != null)
+                    return nested;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                var nested = FindStringValue(item, key, startsWith);
+                if (nested != null)
+                    return nested;
+            }
+        }
+        return null;
+    }
+
+    private async Task<LyricsResult?> YouTubeMusicFetchAsync(string artist, string title)
+    {
+        try
+        {
+            // 1) search for the song
+            string search = await InnertubeCallAsync("search", InnertubeBody(("query",
+                System.Text.Json.JsonSerializer.Serialize(artist + " " + title))));
+            if (search == null)
+                return null;
+
+            using var searchDoc = JsonDocument.Parse(search);
+            string? videoId = FindStringValue(searchDoc.RootElement, "videoId");
+            if (string.IsNullOrEmpty(videoId))
+                return null;
+
+            // 2) get the lyrics browse id (MPLYt_...) from the song's toggle menu
+            string next = await InnertubeCallAsync("next", InnertubeBody(("videoId",
+                System.Text.Json.JsonSerializer.Serialize(videoId))));
+            if (next == null)
+                return null;
+
+            using var nextDoc = JsonDocument.Parse(next);
+            string? browseId = FindStringValue(nextDoc.RootElement, "contentId", "MPLYt");
+            if (string.IsNullOrEmpty(browseId))
+                return null;
+
+            // 3) fetch the lyrics themselves
+            string browse = await InnertubeCallAsync("browse", InnertubeBody(("browseId",
+                System.Text.Json.JsonSerializer.Serialize(browseId))));
+            if (browse == null)
+                return null;
+
+            using var browseDoc = JsonDocument.Parse(browse);
+            string? text = FindDescriptionShelfText(browseDoc.RootElement);
+            if (string.IsNullOrWhiteSpace(text))
+                return null;
+
+            var lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(t => new LyricLine(default, t)).ToList();
+            return lines.Count > 0 ? new LyricsResult(LyricsProviders.Name(LyricsProviders.YouTubeMusic), false, lines) : null;
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "YouTube Music lyrics fetch failed");
+            return null;
+        }
+    }
+
+    /// <summary>Finds a musicDescriptionShelfRenderer and joins its description runs.</summary>
+    private static string? FindDescriptionShelfText(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in element.EnumerateObject())
+            {
+                if (prop.NameEquals("musicDescriptionShelfRenderer") &&
+                    prop.Value.TryGetProperty("description", out var desc) &&
+                    desc.TryGetProperty("runs", out var runs) &&
+                    runs.ValueKind == JsonValueKind.Array)
+                {
+                    string text = string.Join("", runs.EnumerateArray()
+                        .Where(r => r.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String)
+                        .Select(r => r.GetProperty("text").GetString()));
+                    if (text.Trim().Length > 0)
+                        return text;
+                }
+                var nested = FindDescriptionShelfText(prop.Value);
+                if (nested != null)
+                    return nested;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                var nested = FindDescriptionShelfText(item);
+                if (nested != null)
+                    return nested;
+            }
+        }
+        return null;
     }
 
     // --- cache & helpers ---

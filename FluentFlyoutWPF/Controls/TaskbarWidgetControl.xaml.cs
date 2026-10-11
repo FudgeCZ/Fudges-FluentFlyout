@@ -674,6 +674,21 @@ public partial class TaskbarWidgetControl : UserControl
 
                 SongTitle.Text = _actualTitle;
                 SongArtist.Text = _actualArtist;
+
+                // text swap animation: each line slides up and fades in
+                if (SettingsManager.Current.TaskbarWidgetAnimated)
+                {
+                    var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+                    var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(220)) { EasingFunction = ease };
+                    var rise = new DoubleAnimation(6, 0, TimeSpan.FromMilliseconds(220)) { EasingFunction = ease };
+
+                    SongTitle.BeginAnimation(OpacityProperty, fade);
+                    SongArtist.BeginAnimation(OpacityProperty, fade);
+                    if (SongTitle.RenderTransform is TranslateTransform tt)
+                        tt.BeginAnimation(TranslateTransform.YProperty, rise);
+                    if (SongArtist.RenderTransform is TranslateTransform ta)
+                        ta.BeginAnimation(TranslateTransform.YProperty, rise);
+                }
             }
 
             // Update tooltip with song info and the active app volume

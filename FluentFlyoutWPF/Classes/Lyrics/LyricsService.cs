@@ -480,19 +480,30 @@ public sealed class LyricsService
         }
     }
 
-    // --- YouTube Music (Innertube web client; same flow as ytmusicapi.get_lyrics) ---
-
-    private const string InnertubeContext =
+    // --- YouTube Music (Innertube) ---
+    // WEB_REMIX serves the search (classic, typed results); ANDROID_MUSIC is required for
+    // the lyrics fetch — the mobile client is the only one that returns timed lyrics
+    // (timedLyricsData), web clients get at most the plain description shelf. The
+    // X-YouTube-Client-Name/-Version headers must match the body context or the backend
+    // answers "Lyrics not available at this time."
+    private const string InnertubeSearchContext =
         "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\",\"clientVersion\":\"1.20240401.01.00\",\"hl\":\"en\",\"gl\":\"US\"}}}";
 
-    /// <summary>Appends top-level fields to the Innertube context JSON.</summary>
-    private static string InnertubeBody(params (string Name, string JsonValue)[] fields)
+    private const string InnertubeAndroidContext =
+        "{\"context\":{\"client\":{\"clientName\":\"ANDROID_MUSIC\",\"clientVersion\":\"7.21.50\",\"hl\":\"en\",\"gl\":\"US\"}}}";
+
+    private const string InnertubeSearchClientId = "26";
+    private const string InnertubeAndroidClientId = "21";
+    private const string InnertubeAndroidClientVersion = "7.21.50";
+
+    /// <summary>Appends top-level fields to an Innertube context JSON.</summary>
+    private static string InnertubeBody(string context, params (string Name, string JsonValue)[] fields)
     {
         string extra = string.Join(",", fields.Select(f => $"\"{f.Name}\":{f.JsonValue}"));
-        return InnertubeContext.Insert(InnertubeContext.Length - 1, "," + extra);
+        return context.Insert(context.Length - 1, "," + extra);
     }
 
-    private async Task<string?> InnertubeCallAsync(string endpoint, string body)
+    private async Task<string?> InnertubeCallAsync(string endpoint, string body, string clientName, string clientVersion)
     {
         try
         {
@@ -501,11 +512,14 @@ public sealed class LyricsService
             {
                 Content = new StringContent(body, Encoding.UTF8, "application/json"),
             };
+            req.Headers.Add("Origin", "https://music.youtube.com");
+            req.Headers.Add("Referer", "https://music.youtube.com/");
+            req.Headers.Add("X-YouTube-Client-Name", clientName);
+            req.Headers.Add("X-YouTube-Client-Version", clientVersion);
             var auth = YtmSession.GetAuth();
             if (auth != null)
             {
                 req.Headers.Add("Cookie", auth.Value.Cookie);
-                req.Headers.Add("Origin", "https://music.youtube.com");
                 if (auth.Value.Authorization.Length > 0)
                     req.Headers.Add("Authorization", auth.Value.Authorization);
             }
@@ -555,40 +569,65 @@ public sealed class LyricsService
     {
         try
         {
-            // 1) search for the song
-            string search = await InnertubeCallAsync("search", InnertubeBody(("query",
-                System.Text.Json.JsonSerializer.Serialize(artist + " " + title))));
-            if (search == null)
-                return null;
+            // 1) videoId — exact one from the YTM desktop app when it plays this track,
+            //    otherwise search. Skipping search also avoids landing on the official
+            //    music video (OMV), which has no lyrics tab; only song (ATV) tracks do.
+            string? videoId = null;
+            var bridge = await Classes.Services.YtmBridgeService.Instance.GetSongAsync();
+            if (bridge != null && bridge.VideoId.Length > 0 &&
+                bridge.Title.Replace(" ", "").ToLowerInvariant()
+                    .Contains(title.Replace(" ", "").ToLowerInvariant(), StringComparison.Ordinal))
+            {
+                videoId = bridge.VideoId;
+            }
 
-            using var searchDoc = JsonDocument.Parse(search);
-            string? videoId = FindStringValue(searchDoc.RootElement, "videoId");
-            if (string.IsNullOrEmpty(videoId))
-                return null;
+            if (videoId == null)
+            {
+                string search = await InnertubeCallAsync("search",
+                    InnertubeBody(InnertubeSearchContext, ("query",
+                        System.Text.Json.JsonSerializer.Serialize(artist + " " + title))),
+                    InnertubeSearchClientId, "1.20240401.01.00");
+                if (search == null)
+                    return null;
 
-            // 2) get the lyrics browse id (MPLYt_...) from the song's toggle menu
-            string next = await InnertubeCallAsync("next", InnertubeBody(("videoId",
-                System.Text.Json.JsonSerializer.Serialize(videoId))));
+                using var searchDoc = JsonDocument.Parse(search);
+                videoId = FindSongVideoId(searchDoc.RootElement);
+                if (string.IsNullOrEmpty(videoId))
+                    return null;
+            }
+
+            // 2) get the lyrics browse id (MPLYt_...) from the song's tab bar
+            string next = await InnertubeCallAsync("next",
+                InnertubeBody(InnertubeAndroidContext, ("videoId",
+                    System.Text.Json.JsonSerializer.Serialize(videoId))),
+                InnertubeAndroidClientId, InnertubeAndroidClientVersion);
             if (next == null)
                 return null;
 
             using var nextDoc = JsonDocument.Parse(next);
-            string? browseId = FindStringValue(nextDoc.RootElement, "contentId", "MPLYt");
+            string? browseId = FindStringValue(nextDoc.RootElement, "browseId", "MPLYt")
+                ?? FindStringValue(nextDoc.RootElement, "contentId", "MPLYt");
             if (string.IsNullOrEmpty(browseId))
                 return null;
 
-            // 3) fetch the lyrics themselves
-            string browse = await InnertubeCallAsync("browse", InnertubeBody(("browseId",
-                System.Text.Json.JsonSerializer.Serialize(browseId))));
+            // 3) fetch the lyrics themselves (ANDROID_MUSIC client for timed data)
+            string browse = await InnertubeCallAsync("browse",
+                InnertubeBody(InnertubeAndroidContext, ("browseId",
+                    System.Text.Json.JsonSerializer.Serialize(browseId))),
+                InnertubeAndroidClientId, InnertubeAndroidClientVersion);
             if (browse == null)
                 return null;
 
             using var browseDoc = JsonDocument.Parse(browse);
+            var lines = FindTimedLyrics(browseDoc.RootElement);
+            if (lines != null && lines.Count > 0)
+                return new LyricsResult(LyricsProviders.Name(LyricsProviders.YouTubeMusic), true, lines);
+
             string? text = FindDescriptionShelfText(browseDoc.RootElement);
             if (string.IsNullOrWhiteSpace(text))
                 return null;
 
-            var lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(t => new LyricLine(default, t)).ToList();
             return lines.Count > 0 ? new LyricsResult(LyricsProviders.Name(LyricsProviders.YouTubeMusic), false, lines) : null;
         }
@@ -597,6 +636,102 @@ public sealed class LyricsService
             Logger.Debug(ex, "YouTube Music lyrics fetch failed");
             return null;
         }
+    }
+
+    /// <summary>Picks a song (ATV) videoId from search results — official music videos
+    /// (OMV) and user uploads have no lyrics tab, so they are skipped when a song
+    /// version exists.</summary>
+    private static string? FindSongVideoId(JsonElement element)
+    {
+        List<string> songIds = [];
+        List<string> anyIds = [];
+        CollectSongCandidates(element, songIds, anyIds);
+        if (songIds.Count > 0) return songIds[0];
+        if (anyIds.Count > 0) return anyIds[0];
+        return null;
+    }
+
+    private static void CollectSongCandidates(JsonElement element, List<string> songIds, List<string> anyIds)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in element.EnumerateObject())
+            {
+                if ((prop.NameEquals("playNavigationEndpoint") || prop.NameEquals("navigationEndpoint")) &&
+                    prop.Value.ValueKind == JsonValueKind.Object &&
+                    prop.Value.TryGetProperty("watchEndpoint", out var watch) &&
+                    watch.TryGetProperty("videoId", out var vid) &&
+                    vid.ValueKind == JsonValueKind.String)
+                {
+                    string? id = vid.GetString();
+                    if (id == null)
+                        continue;
+                    anyIds.Add(id);
+                    if (watch.TryGetProperty("watchEndpointMusicSupportedConfigs", out var configs) &&
+                        configs.TryGetProperty("watchEndpointMusicConfig", out var musicConfig) &&
+                        musicConfig.TryGetProperty("musicVideoType", out var type) &&
+                        type.ValueKind == JsonValueKind.String)
+                    {
+                        string t = type.GetString() ?? "";
+                        if (t is "MUSIC_VIDEO_TYPE_OFFICIAL_SOURCE_MUSIC" or "MUSIC_VIDEO_TYPE_ATV")
+                            songIds.Add(id);
+                    }
+                    continue;
+                }
+                CollectSongCandidates(prop.Value, songIds, anyIds);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+                CollectSongCandidates(item, songIds, anyIds);
+        }
+    }
+
+    /// <summary>Finds timedLyricsData and converts its cue ranges (milliseconds as JSON
+    /// strings) into synced lines. Null when the response has none.</summary>
+    private static List<LyricLine>? FindTimedLyrics(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in element.EnumerateObject())
+            {
+                if (prop.NameEquals("timedLyricsData") && prop.Value.ValueKind == JsonValueKind.Array)
+                {
+                    List<LyricLine> lines = [];
+                    foreach (var item in prop.Value.EnumerateArray())
+                    {
+                        if (item.ValueKind != JsonValueKind.Object ||
+                            !item.TryGetProperty("lyricLine", out var line) ||
+                            line.ValueKind != JsonValueKind.String ||
+                            !item.TryGetProperty("cueRange", out var cue) ||
+                            !cue.TryGetProperty("startTimeMilliseconds", out var start) ||
+                            start.ValueKind != JsonValueKind.String ||
+                            !long.TryParse(start.GetString(), out long ms))
+                            continue;
+                        string text = line.GetString() ?? "";
+                        if (text.Length == 0)
+                            continue;
+                        lines.Add(new LyricLine(TimeSpan.FromMilliseconds(ms), text));
+                    }
+                    if (lines.Count > 0)
+                        return lines;
+                }
+                var nested = FindTimedLyrics(prop.Value);
+                if (nested != null)
+                    return nested;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                var nested = FindTimedLyrics(item);
+                if (nested != null)
+                    return nested;
+            }
+        }
+        return null;
     }
 
     /// <summary>Finds a musicDescriptionShelfRenderer and joins its description runs.</summary>

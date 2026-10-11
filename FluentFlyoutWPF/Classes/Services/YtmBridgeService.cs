@@ -146,6 +146,31 @@ public sealed class YtmBridgeService
         return await PostAsync("/api/v1/switch-repeat", new { iteration = 1 });
     }
 
+    /// <summary>Currently playing song from the bridge, for the lyrics provider's exact
+    /// videoId path. Nulls when unreachable/idle.</summary>
+    public sealed record BridgeSong(string VideoId, string Title, string Artist);
+
+    /// <summary>Reads the currently playing song (GET /api/v1/song). Null when idle or unreachable.</summary>
+    public async Task<BridgeSong?> GetSongAsync()
+    {
+        var json = await GetJsonAsync("/api/v1/song");
+        if (!json.HasValue) return null;
+        try
+        {
+            if (json.Value.ValueKind != JsonValueKind.Object) return null;
+            string? videoId = json.Value.TryGetProperty("videoId", out var vid) ? vid.GetString() : null;
+            string? title = json.Value.TryGetProperty("title", out var t) ? t.GetString() : null;
+            string? artist = json.Value.TryGetProperty("artist", out var a) ? a.GetString() : null;
+            if (string.IsNullOrEmpty(videoId)) return null;
+            return new BridgeSong(videoId, title ?? "", artist ?? "");
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "YTM bridge song parse failed");
+            return null;
+        }
+    }
+
     /// <summary>Reads YT Music's shuffle/repeat state. Nulls when unreachable/unknown.</summary>
     public async Task<(bool? Shuffle, int? Repeat)> GetShuffleRepeatStateAsync()
     {

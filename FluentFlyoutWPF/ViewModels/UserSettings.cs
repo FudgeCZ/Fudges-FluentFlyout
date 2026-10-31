@@ -504,6 +504,12 @@ public partial class UserSettings : ObservableObject
     public partial bool TaskbarWidgetFixedWidth { get; set; }
 
     /// <summary>
+    /// Maximum logical width of the taskbar widget (cover + song info section) in pixels.
+    /// </summary>
+    [ObservableProperty]
+    public partial int TaskbarWidgetMaxWidth { get; set; }
+
+    /// <summary>
     /// Gets or sets a value indicating whether the pause icon overlay should be completely hidden from view.
     /// </summary>
     [ObservableProperty]
@@ -900,6 +906,7 @@ public partial class UserSettings : ObservableObject
         TaskbarWidgetBackgroundBlur = false;
         TaskbarWidgetHideCompletely = false;
         TaskbarWidgetFixedWidth = false;
+        TaskbarWidgetMaxWidth = 240;
         TaskbarWidgetShowPauseOverlay = true;
         TaskbarWidgetControlsEnabled = false;
         TaskbarWidgetControlsPosition = 1;
@@ -1139,6 +1146,12 @@ public partial class UserSettings : ObservableObject
     }
 
     partial void OnTaskbarWidgetFixedWidthChanged(bool oldValue, bool newValue)
+    {
+        if (oldValue == newValue || _initializing) return;
+        UpdateTaskbar();
+    }
+
+    partial void OnTaskbarWidgetMaxWidthChanged(int oldValue, int newValue)
     {
         if (oldValue == newValue || _initializing) return;
         UpdateTaskbar();

@@ -212,6 +212,19 @@
                 </ui:CardControl.Header>
                 <ui:ToggleSwitch IsChecked="{Binding TaskbarWidgetFixedWidth, Mode=TwoWay}" IsEnabled="{Binding IsPremiumUnlocked}" />
             </ui:CardControl>
+            <ui:CardControl x:Name="TaskbarWidgetMaxWidthTitleCard" Tag="Indexable" Icon="{ui:SymbolIcon ArrowAutofitWidth24}" Margin="0,0,0,3">
+                <ui:CardControl.Header>
+                    <StackPanel Orientation="Vertical">
+                        <TextBlock Text="Maximum width" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                        <TextBlock Text="Maximum width of the song info and cover area in pixels (default 240)." FontSize="12" Opacity="0.5" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+                <StackPanel Orientation="Horizontal">
+                    <Slider Minimum="100" Maximum="600" Value="{Binding TaskbarWidgetMaxWidth, Mode=TwoWay}" TickFrequency="10" IsSnapToTickEnabled="True" Width="150"
+                            IsMoveToPointEnabled="True" IsEnabled="{Binding IsPremiumUnlocked}" />
+                    <ui:TextBlock Text="{Binding TaskbarWidgetMaxWidth}" Width="36" TextAlignment="Center" Margin="12,0,0,0" />
+                </StackPanel>
+            </ui:CardControl>
             <ui:CardControl x:Name="TaskbarWidgetAutoHideTitleCard" Tag="Indexable" Grid.Row="10" Icon="{ui:SymbolIcon EyeLines24}" Margin="0,0,0,12">
                 <ui:CardControl.Header>
                     <StackPanel Orientation="Vertical">

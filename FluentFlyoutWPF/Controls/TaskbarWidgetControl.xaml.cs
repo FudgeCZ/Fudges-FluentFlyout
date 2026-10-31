@@ -312,8 +312,9 @@ public partial class TaskbarWidgetControl : UserControl
             textChanged = true;
         }
 
-        // maximum width limit, same as Windows native widget
-        double maxLogicalWidth = _nativeWidgetsPadding / _scale;
+        // maximum width limit (default 240 matches Windows native widget)
+        int configuredMax = SettingsManager.Current.TaskbarWidgetMaxWidth;
+        double maxLogicalWidth = Math.Clamp(configuredMax <= 0 ? 240 : configuredMax, 100, 600);
         double logicalWidth;
 
         if (_isVertical)

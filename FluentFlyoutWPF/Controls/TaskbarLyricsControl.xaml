@@ -19,5 +19,14 @@
         <TextBlock x:Name="LoadingText" Text="" FontSize="12" Opacity="0.45"
                    HorizontalAlignment="Center" VerticalAlignment="Center"
                    Visibility="Collapsed" />
+        <Grid.ContextMenu>
+            <ContextMenu Style="{StaticResource UiContextMenu}">
+                <ui:MenuItem x:Name="DisableSongLyricsMenuItem" Header="Disable lyrics for this song" Click="DisableSongLyrics_Click">
+                    <ui:MenuItem.Icon>
+                        <ui:SymbolIcon Symbol="Prohibited24" />
+                    </ui:MenuItem.Icon>
+                </ui:MenuItem>
+            </ContextMenu>
+        </Grid.ContextMenu>
     </Grid>
 </UserControl>

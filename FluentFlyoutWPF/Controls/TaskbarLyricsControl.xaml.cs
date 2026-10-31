@@ -80,6 +80,9 @@ public partial class TaskbarLyricsControl : UserControl
         LyricsService.Instance.LyricsChanged += OnLyricsServiceChanged;
         Unloaded += (_, _) => LyricsService.Instance.LyricsChanged -= OnLyricsServiceChanged;
 
+        LyricsService.Instance.TrackDisabledStateChanged += OnTrackDisabledStateChanged;
+        Unloaded += (_, _) => LyricsService.Instance.TrackDisabledStateChanged -= OnTrackDisabledStateChanged;
+
         _tickTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
         _tickTimer.Tick += (_, _) => TickScroll();
 
@@ -169,7 +172,10 @@ public partial class TaskbarLyricsControl : UserControl
         _lastTitle = title;
         _lastDuration = duration;
 
-        if (!SettingsManager.Current.LyricsEnabled || string.IsNullOrWhiteSpace(artist) || string.IsNullOrWhiteSpace(title))
+        if (!SettingsManager.Current.LyricsEnabled ||
+            string.IsNullOrWhiteSpace(artist) ||
+            string.IsNullOrWhiteSpace(title) ||
+            LyricsService.Instance.IsTrackDisabled(artist, title))
         {
             Clear();
             return;
@@ -245,6 +251,30 @@ public partial class TaskbarLyricsControl : UserControl
     private void OnLyricsServiceChanged()
     {
         LoadLyrics(LyricsService.Instance.Current);
+    }
+
+    private void OnTrackDisabledStateChanged()
+    {
+        if (string.IsNullOrWhiteSpace(_lastArtist) && string.IsNullOrWhiteSpace(_lastTitle))
+            return;
+
+        if (LyricsService.Instance.IsTrackDisabled(_lastArtist, _lastTitle))
+        {
+            Clear();
+        }
+        else if (SettingsManager.Current.LyricsEnabled && !HasContent && !_awaitingResult)
+        {
+            SetTrack(_lastArtist, _lastTitle, _lastDuration);
+        }
+    }
+
+    private void DisableSongLyrics_Click(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(_lastArtist) && string.IsNullOrWhiteSpace(_lastTitle))
+            return;
+
+        LyricsService.Instance.SetTrackDisabled(_lastArtist, _lastTitle, true);
+        Clear();
     }
 
     private void LoadLyrics(LyricsResult? result)

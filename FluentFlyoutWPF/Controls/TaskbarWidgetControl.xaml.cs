@@ -1072,6 +1072,30 @@ public partial class TaskbarWidgetControl : UserControl
     }
 
     // Event handlers for context menu items
+    private void ContextMenu_Opened(object sender, RoutedEventArgs e)
+    {
+        bool canToggleLyrics = SettingsManager.Current.LyricsEnabled &&
+            (!string.IsNullOrWhiteSpace(_actualArtist) || !string.IsNullOrWhiteSpace(_actualTitle));
+
+        ContextMenuToggleSongLyrics.Visibility = canToggleLyrics ? Visibility.Visible : Visibility.Collapsed;
+        if (!canToggleLyrics)
+            return;
+
+        bool isDisabled = FluentFlyoutWPF.Classes.Lyrics.LyricsService.Instance.IsTrackDisabled(_actualArtist, _actualTitle);
+        ContextMenuToggleSongLyrics.Header = isDisabled ? "Enable lyrics for this song" : "Disable lyrics for this song";
+        ContextMenuToggleSongLyricsIcon.Symbol = isDisabled ? SymbolRegular.MusicNote120 : SymbolRegular.Prohibited24;
+    }
+
+    private void ContextMenuToggleSongLyrics_Click(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(_actualArtist) && string.IsNullOrWhiteSpace(_actualTitle))
+            return;
+
+        var svc = FluentFlyoutWPF.Classes.Lyrics.LyricsService.Instance;
+        bool isDisabled = svc.IsTrackDisabled(_actualArtist, _actualTitle);
+        svc.SetTrackDisabled(_actualArtist, _actualTitle, !isDisabled);
+    }
+
     private async void ContextMenuMediaPlayer_Click(object sender, RoutedEventArgs e)
     {
         if (_mainWindow == null) return;

@@ -53,6 +53,8 @@ public sealed class LyricsService
     /// </summary>
     public LyricsTrackState StateOf(string artist, string title, TimeSpan duration)
     {
+        if (IsTrackDisabled(artist, title))
+            return LyricsTrackState.Missing;
         if (CurrentKey != MakeKey(artist, title, duration))
             return LyricsTrackState.Unknown;
         return Current != null ? LyricsTrackState.Found : LyricsTrackState.Missing;
@@ -63,6 +65,9 @@ public sealed class LyricsService
 
     /// <summary>Raised on the UI thread whenever <see cref="Current"/> is replaced.</summary>
     public event Action? LyricsChanged;
+
+    /// <summary>Raised on the UI thread when per-track disabled state changes.</summary>
+    public event Action? TrackDisabledStateChanged;
 
     public LyricsService()
     {
@@ -77,6 +82,16 @@ public sealed class LyricsService
     /// </summary>
     public async Task FetchAsync(string artist, string title, TimeSpan duration, int? providerOverride = null)
     {
+        if (IsTrackDisabled(artist, title))
+        {
+            string disabledKey = MakeKey(artist, title, duration);
+            _requestKey = disabledKey;
+            CurrentKey = disabledKey;
+            Current = null;
+            NotifyChanged();
+            return;
+        }
+
         int provider = providerOverride ?? SettingsManager.Current.LyricsProvider;
         string key = MakeKey(artist, title, duration);
 
@@ -169,6 +184,12 @@ public sealed class LyricsService
         _requestKey = key;
         CurrentKey = key;
         Current = null;
+
+        if (IsTrackDisabled(artist, title))
+        {
+            NotifyChanged();
+            return null;
+        }
 
         int? winner = GetWinner(artist, title, duration);
         var order = new List<int> { mainProvider };
@@ -818,7 +839,10 @@ public sealed class LyricsService
     private void PruneCache()
     {
         var dir = new DirectoryInfo(CacheDir);
-        var files = dir.GetFiles("*.json").OrderByDescending(f => f.LastWriteTimeUtc).ToList();
+        var files = dir.GetFiles("*.json")
+            .Where(f => f.Name is not ("winners.json" or "offsets.json" or "disabled.json"))
+            .OrderByDescending(f => f.LastWriteTimeUtc)
+            .ToList();
         for (int i = 200; i < files.Count; i++)
         {
             try { files[i].Delete(); } catch { /* best effort */ }
@@ -849,6 +873,138 @@ public sealed class LyricsService
             Instance._offsets.Clear();
         }
         try { File.Delete(OffsetsPath); } catch { /* best effort */ }
+        Instance.ClearDisabledTracks();
+    }
+
+    // --- per-track disabled lyrics memory ---
+
+    private static string DisabledPath => Path.Combine(CacheDir, "disabled.json");
+    private readonly HashSet<string> _disabledTracks = new(StringComparer.OrdinalIgnoreCase);
+    private bool _disabledLoaded;
+    private readonly object _disabledLock = new();
+
+    private static string MakeTrackId(string? artist, string? title) =>
+        $"{(artist ?? "").Trim().ToLowerInvariant()}|{(title ?? "").Trim().ToLowerInvariant()}";
+
+    /// <summary>Whether the user has disabled lyrics for this track.</summary>
+    public bool IsTrackDisabled(string? artist, string? title)
+    {
+        if (string.IsNullOrWhiteSpace(artist) && string.IsNullOrWhiteSpace(title))
+            return false;
+
+        lock (_disabledLock)
+        {
+            EnsureDisabledLoaded();
+            return _disabledTracks.Contains(MakeTrackId(artist, title));
+        }
+    }
+
+    /// <summary>Total number of tracks with lyrics disabled.</summary>
+    public int DisabledTracksCount
+    {
+        get
+        {
+            lock (_disabledLock)
+            {
+                EnsureDisabledLoaded();
+                return _disabledTracks.Count;
+            }
+        }
+    }
+
+    /// <summary>Enables or disables lyrics for a specific track and persists the choice.</summary>
+    public void SetTrackDisabled(string? artist, string? title, bool disabled)
+    {
+        if (string.IsNullOrWhiteSpace(artist) && string.IsNullOrWhiteSpace(title))
+            return;
+
+        string id = MakeTrackId(artist, title);
+        bool changed;
+        lock (_disabledLock)
+        {
+            EnsureDisabledLoaded();
+            changed = disabled ? _disabledTracks.Add(id) : _disabledTracks.Remove(id);
+            if (changed)
+                SaveDisabledLocked();
+        }
+
+        if (!changed)
+            return;
+
+        if (disabled)
+        {
+            var parts = CurrentKey.Split('|');
+            if (parts.Length >= 2 && MakeTrackId(parts[0], parts[1]) == id)
+            {
+                _requestKey = "";
+                Current = null;
+                NotifyChanged();
+            }
+        }
+        else
+        {
+            var parts = CurrentKey.Split('|');
+            if (parts.Length >= 2 && MakeTrackId(parts[0], parts[1]) == id)
+            {
+                CurrentKey = "";
+            }
+        }
+
+        NotifyDisabledChanged();
+    }
+
+    /// <summary>Re-enables lyrics for all previously disabled tracks.</summary>
+    public void ClearDisabledTracks()
+    {
+        lock (_disabledLock)
+        {
+            EnsureDisabledLoaded();
+            _disabledTracks.Clear();
+            try { File.Delete(DisabledPath); } catch { /* best effort */ }
+        }
+        CurrentKey = "";
+        NotifyDisabledChanged();
+    }
+
+    private void SaveDisabledLocked()
+    {
+        try
+        {
+            Directory.CreateDirectory(CacheDir);
+            File.WriteAllText(DisabledPath,
+                JsonSerializer.Serialize(_disabledTracks.OrderBy(x => x, StringComparer.Ordinal).ToList(), JsonOptions));
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed to save disabled lyrics tracks");
+        }
+    }
+
+    private void EnsureDisabledLoaded()
+    {
+        if (_disabledLoaded)
+            return;
+        _disabledLoaded = true;
+        try
+        {
+            if (File.Exists(DisabledPath))
+            {
+                var data = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(DisabledPath), JsonOptions);
+                if (data != null)
+                    foreach (var item in data)
+                        if (!string.IsNullOrWhiteSpace(item))
+                            _disabledTracks.Add(item);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed to load disabled lyrics tracks");
+        }
+    }
+
+    private void NotifyDisabledChanged()
+    {
+        System.Windows.Application.Current?.Dispatcher?.BeginInvoke(() => TrackDisabledStateChanged?.Invoke());
     }
 
     // --- per-track sync offset memory ---

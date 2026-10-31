@@ -17,7 +17,7 @@
         <TextBlock Text="Lyrics" FontSize="24" FontWeight="SemiBold" FontFamily="Segoe UI Variable" Margin="0,0,0,20" />
         <StackPanel Orientation="Horizontal" Margin="0,0,0,24">
             <TextBlock FontSize="14" FontWeight="Regular" Opacity="0.75" MaxWidth="600" TextWrapping="WrapWithOverflow"
-                       Text="Shows scrolling lyrics in the taskbar, next to the visualizer. The widget appears only when lyrics are found for the current track. Right-click the widget to switch providers for the current song." />
+                       Text="Shows scrolling lyrics in the taskbar, next to the visualizer. The widget appears only when lyrics are found for the current track. Right-click the lyrics widget to disable lyrics for the current song." />
         </StackPanel>
 
         <ui:CardControl Icon="{ui:SymbolIcon MusicNote120}" Margin="0,0,0,3">
@@ -97,6 +97,16 @@
                         IsMoveToPointEnabled="True" />
                 <ui:TextBlock Text="{Binding LyricsOffsetMs}" Width="48" TextAlignment="Center" Margin="12,0,0,0" />
             </StackPanel>
+        </ui:CardControl>
+
+        <ui:CardControl Icon="{ui:SymbolIcon Prohibited24}" Margin="0,0,0,3">
+            <ui:CardControl.Header>
+                <StackPanel Orientation="Vertical">
+                    <TextBlock Text="Disabled songs" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                    <TextBlock x:Name="DisabledSongsText" Text="Songs where lyrics were disabled via right-click." FontSize="12" Opacity="0.5" />
+                </StackPanel>
+            </ui:CardControl.Header>
+            <Button x:Name="ResetDisabledSongsButton" Content="Reset" Click="ResetDisabledSongs_Click" />
         </ui:CardControl>
 
         <ui:CardControl Icon="{ui:SymbolIcon Delete24}" Margin="0,0,0,12">

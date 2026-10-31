@@ -16,13 +16,36 @@ public partial class LyricsPage : Page
     {
         InitializeComponent();
         DataContext = SettingsManager.Current;
-        Loaded += (_, _) => SessionStatusText.Text =
-            SettingsManager.Current.LyricsYtmSession.Length > 0 ? "Session imported." : "";
+        Loaded += (_, _) =>
+        {
+            SessionStatusText.Text = SettingsManager.Current.LyricsYtmSession.Length > 0 ? "Session imported." : "";
+            UpdateDisabledSongsUi();
+        };
+        LyricsService.Instance.TrackDisabledStateChanged += UpdateDisabledSongsUi;
+        Unloaded += (_, _) => LyricsService.Instance.TrackDisabledStateChanged -= UpdateDisabledSongsUi;
+    }
+
+    private void UpdateDisabledSongsUi()
+    {
+        int count = LyricsService.Instance.DisabledTracksCount;
+        DisabledSongsText.Text = count == 0
+            ? "No songs currently have lyrics disabled."
+            : count == 1
+                ? "1 song has lyrics disabled."
+                : $"{count} songs have lyrics disabled.";
+        ResetDisabledSongsButton.IsEnabled = count > 0;
+    }
+
+    private void ResetDisabledSongs_Click(object sender, RoutedEventArgs e)
+    {
+        LyricsService.Instance.ClearDisabledTracks();
+        UpdateDisabledSongsUi();
     }
 
     private void ClearCache_Click(object sender, RoutedEventArgs e)
     {
         LyricsService.ClearCache();
+        UpdateDisabledSongsUi();
     }
 
     private void ImportSession_Click(object sender, RoutedEventArgs e)

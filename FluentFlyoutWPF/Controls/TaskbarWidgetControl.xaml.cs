@@ -250,6 +250,8 @@ public partial class TaskbarWidgetControl : UserControl
     {
         if (string.IsNullOrEmpty(SongTitle.Text + SongArtist.Text)) return;
 
+        RefreshAppVolumeTooltip();
+
         SolidColorBrush targetBackgroundBrush;
         // hover effects with animations, hard-coded colors because I can't find the resource brushes
         WindowsThemeDetector.GetWindowsTheme(out _, out var systemTheme);
@@ -322,7 +324,7 @@ public partial class TaskbarWidgetControl : UserControl
         if (_mainWindow == null) return;
 
         // toggle main flyout when clicked
-        _mainWindow.ShowMediaFlyout(toggleMode: true, forceShow: true);
+        _mainWindow.ShowMediaFlyout(toggleMode: true, forceShow: true, withVolume: true);
     }
 
     private void MainBorder_MouseWheel(object sender, MouseWheelEventArgs e)
@@ -1120,18 +1122,20 @@ public partial class TaskbarWidgetControl : UserControl
     }
 
     // Event handlers for context menu items
-    private void ContextMenu_Opened(object sender, RoutedEventArgs e)
+    private void TaskbarContextMenu_Opened(object sender, RoutedEventArgs e)
     {
         bool canToggleLyrics = Settings.LyricsEnabled &&
             (!string.IsNullOrWhiteSpace(_actualArtist) || !string.IsNullOrWhiteSpace(_actualTitle));
 
         ContextMenuToggleSongLyrics.Visibility = canToggleLyrics ? Visibility.Visible : Visibility.Collapsed;
-        if (!canToggleLyrics)
-            return;
+        if (canToggleLyrics)
+        {
+            bool isDisabled = FluentFlyoutWPF.Classes.Lyrics.LyricsService.Instance.IsTrackDisabled(_actualArtist, _actualTitle);
+            ContextMenuToggleSongLyrics.Header = isDisabled ? "Enable lyrics for this song" : "Disable lyrics for this song";
+            ContextMenuToggleSongLyricsIcon.Symbol = isDisabled ? SymbolRegular.MusicNote120 : SymbolRegular.Prohibited24;
+        }
 
-        bool isDisabled = FluentFlyoutWPF.Classes.Lyrics.LyricsService.Instance.IsTrackDisabled(_actualArtist, _actualTitle);
-        ContextMenuToggleSongLyrics.Header = isDisabled ? "Enable lyrics for this song" : "Disable lyrics for this song";
-        ContextMenuToggleSongLyricsIcon.Symbol = isDisabled ? SymbolRegular.MusicNote120 : SymbolRegular.Prohibited24;
+        _mainWindow?.PopulateSessionSwitcherMenu(ContextMenuSessionSwitcher);
     }
 
     private void ContextMenuToggleSongLyrics_Click(object sender, RoutedEventArgs e)

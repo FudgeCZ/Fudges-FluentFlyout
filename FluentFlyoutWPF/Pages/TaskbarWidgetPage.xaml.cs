@@ -31,4 +31,9 @@ public partial class TaskbarWidgetPage : Page
     {
         SettingsManager.Current.CopyCurrentMonitorSettingsToAll(MonitorUtil.GetMonitors().Count);
     }
+
+    private void AppFiltering_Click(object sender, System.Windows.RoutedEventArgs e)
+    {
+        SettingsWindow.NavigateToPage(typeof(AppFilteringPage));
+    }
 }

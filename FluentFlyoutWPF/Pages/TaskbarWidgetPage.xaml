@@ -362,5 +362,9 @@
                 <ui:ToggleSwitch IsChecked="{Binding TaskbarWidgetProgressBarEnabled, Mode=TwoWay}" />
             </ui:CardControl>
         </StackPanel>
+        <TextBlock Text="{DynamicResource RelatedSettingsTitle}" FontSize="14" FontWeight="SemiBold" Margin="0,12,0,6" />
+        <ui:CardAction x:Name="AppFilteringTitleCard" Tag="Indexable" Margin="0,0,0,76" Icon="{ui:SymbolIcon Filter24}" IsChevronVisible="True" Click="AppFiltering_Click">
+            <ui:TextBlock Text="{DynamicResource AppFilteringTitle}" />
+        </ui:CardAction>
     </StackPanel>
 </Page>

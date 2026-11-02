@@ -846,8 +846,81 @@ public partial class UserSettings : ObservableObject
     [ObservableProperty]
     public partial bool AnonymousTelemetryAllowed { get; set; }
 
+    /// <summary>
+    /// Per-monitor taskbar widget, visualizer, and lyrics profiles.
+    /// </summary>
+    [ObservableProperty]
+    public partial ObservableCollection<MonitorTaskbarSettings> MonitorProfiles { get; set; } = [];
+
     [XmlIgnore]
     private bool _initializing = true;
+
+    [XmlIgnore]
+    private bool _switchingMonitorProfile;
+
+    [XmlIgnore]
+    public bool IsAnyMonitorWidgetEnabled =>
+        MonitorProfiles.Count > 0 ? MonitorProfiles.Any(m => m.TaskbarWidgetEnabled) : TaskbarWidgetEnabled;
+
+    [XmlIgnore]
+    public bool IsAnyMonitorLyricsEnabled =>
+        MonitorProfiles.Count > 0 ? MonitorProfiles.Any(m => m.TaskbarWidgetEnabled && m.LyricsEnabled) : (TaskbarWidgetEnabled && LyricsEnabled);
+
+    /// <summary>
+    /// Returns the per-monitor taskbar settings profile for <paramref name="monitorIndex"/>,
+    /// creating and seeding it if it does not exist yet.
+    /// </summary>
+    public MonitorTaskbarSettings GetMonitorSettings(int monitorIndex)
+    {
+        monitorIndex = Math.Max(0, monitorIndex);
+        var existing = MonitorProfiles.FirstOrDefault(m => m.MonitorIndex == monitorIndex);
+        if (existing != null)
+            return existing;
+
+        var created = new MonitorTaskbarSettings { MonitorIndex = monitorIndex };
+        var primary = MonitorProfiles.FirstOrDefault(m => m.MonitorIndex == 0);
+        if (primary != null && monitorIndex != 0)
+            created.CopyFrom(primary);
+        else
+            created.CopyFromUserSettings(this);
+
+        MonitorProfiles.Add(created);
+        return created;
+    }
+
+    /// <summary>
+    /// Syncs the flat taskbar/visualizer/lyrics properties on <see cref="UserSettings"/>
+    /// into the currently selected monitor's <see cref="MonitorTaskbarSettings"/>.
+    /// </summary>
+    public void SyncActiveMonitorFromUserSettings()
+    {
+        if (_initializing || _switchingMonitorProfile)
+            return;
+
+        var profile = GetMonitorSettings(TaskbarWidgetSelectedMonitor);
+        profile.CopyFromUserSettings(this);
+    }
+
+    /// <summary>
+    /// Copies the currently selected monitor's profile to all monitors up to <paramref name="monitorCount"/>.
+    /// </summary>
+    public void CopyCurrentMonitorSettingsToAll(int monitorCount)
+    {
+        SyncActiveMonitorFromUserSettings();
+        var source = GetMonitorSettings(TaskbarWidgetSelectedMonitor);
+        int count = Math.Max(monitorCount, MonitorProfiles.Count);
+        for (int i = 0; i < count; i++)
+        {
+            if (i == source.MonitorIndex)
+                continue;
+            var target = GetMonitorSettings(i);
+            target.CopyFrom(source);
+        }
+        TaskbarVisualizerControl.RefreshSharedVisualizerState();
+        Application.Current?.Dispatcher?.BeginInvoke(() => TaskbarVisualizerControl.ApplyBeatGlow());
+        UpdateTaskbar();
+        SettingsManager.SaveSettings();
+    }
 
     public UserSettings()
     {
@@ -972,11 +1045,16 @@ public partial class UserSettings : ObservableObject
 
     private async void OnPropertyChangedSaveSettings(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
-        if (_initializing) return;
+        if (_initializing || _switchingMonitorProfile) return;
 
         // Only trigger save if a persisted property changed
         if (string.IsNullOrEmpty(e.PropertyName) || !PersistedPropertyNames.Contains(e.PropertyName))
             return;
+
+        if (e.PropertyName != nameof(TaskbarWidgetSelectedMonitor))
+        {
+            SyncActiveMonitorFromUserSettings();
+        }
 
 #if DEBUG
         Logger.Debug("Property '{PropertyName}' changed, scheduling settings save.", e.PropertyName);
@@ -1021,7 +1099,54 @@ public partial class UserSettings : ObservableObject
     /// </summary>
     internal void CompleteInitialization()
     {
+        if (MonitorProfiles.Count == 0)
+        {
+            var initial = new MonitorTaskbarSettings { MonitorIndex = Math.Max(0, TaskbarWidgetSelectedMonitor) };
+            initial.CopyFromUserSettings(this);
+            MonitorProfiles.Add(initial);
+            if (initial.MonitorIndex != 0)
+            {
+                var zero = new MonitorTaskbarSettings { MonitorIndex = 0 };
+                zero.CopyFrom(initial);
+                MonitorProfiles.Add(zero);
+            }
+        }
+        else
+        {
+            _switchingMonitorProfile = true;
+            try
+            {
+                GetMonitorSettings(TaskbarWidgetSelectedMonitor).ApplyToUserSettings(this);
+            }
+            finally
+            {
+                _switchingMonitorProfile = false;
+            }
+        }
+
         _initializing = false;
+    }
+
+    partial void OnTaskbarWidgetSelectedMonitorChanged(int oldValue, int newValue)
+    {
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile || newValue < 0)
+            return;
+
+        if (oldValue >= 0)
+        {
+            GetMonitorSettings(oldValue).CopyFromUserSettings(this);
+        }
+
+        _switchingMonitorProfile = true;
+        try
+        {
+            var nextProfile = GetMonitorSettings(newValue);
+            nextProfile.ApplyToUserSettings(this);
+        }
+        finally
+        {
+            _switchingMonitorProfile = false;
+        }
     }
 
     partial void OnAppLanguageChanged(string oldValue, string newValue)
@@ -1095,19 +1220,21 @@ public partial class UserSettings : ObservableObject
 
     partial void OnTaskbarWidgetShuffleRepeatEnabledChanged(bool oldValue, bool newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbar();
     }
 
     partial void OnTaskbarWidgetTimeEnabledChanged(bool oldValue, bool newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbar();
     }
 
     partial void OnTaskbarWidgetEnabledChanged(bool oldValue, bool newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
 
         // Check premium status before allowing widget to be enabled
         if (newValue && !SettingsManager.Current.IsPremiumUnlocked)
@@ -1117,69 +1244,78 @@ public partial class UserSettings : ObservableObject
             return;
         }
 
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbar();
     }
 
     // Update taskbar when relevant settings change
     partial void OnTaskbarWidgetPositionChanged(int oldValue, int newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbar();
     }
 
     partial void OnTaskbarWidgetManualPaddingChanged(int oldValue, int newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbar();
     }
 
     partial void OnTaskbarWidgetBackgroundBlurChanged(bool oldValue, bool newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbar();
     }
 
     partial void OnTaskbarWidgetHideCompletelyChanged(bool oldValue, bool newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbar();
     }
 
     partial void OnTaskbarWidgetFixedWidthChanged(bool oldValue, bool newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbar();
     }
 
     partial void OnTaskbarWidgetMaxWidthChanged(int oldValue, int newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbar();
     }
 
     partial void OnTaskbarWidgetShowPauseOverlayChanged(bool oldValue, bool newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbar();
     }
 
     partial void OnTaskbarWidgetControlsEnabledChanged(bool oldValue, bool newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbar();
     }
 
     partial void OnTaskbarWidgetControlsPositionChanged(int oldValue, int newValue)
     {
-        if (oldValue == newValue || _initializing) return;
-
-        MainWindow mainWindow = (MainWindow)Application.Current.MainWindow;
-        mainWindow.taskbarWindow?.Widget?.ReorderControls();
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
+        UpdateTaskbar();
     }
 
     partial void OnTaskbarVisualizerPositionChanged(int oldValue, int newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbar();
     }
 
@@ -1191,58 +1327,69 @@ public partial class UserSettings : ObservableObject
 
     private void UpdateTaskbar()
     {
-        MainWindow mainWindow = (MainWindow)Application.Current.MainWindow;
-        mainWindow.UpdateTaskbar();
+        if (Application.Current?.MainWindow is MainWindow mainWindow)
+        {
+            mainWindow.UpdateTaskbar();
+        }
     }
 
     partial void OnTaskbarWidgetScrollingEnabledChanged(bool oldValue, bool newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbarMarquees();
     }
 
     partial void OnTaskbarWidgetScrollingTextLoopForeverChanged(bool oldValue, bool newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbarMarquees();
     }
 
     partial void OnTaskbarWidgetScrollingTextSpeedChanged(int oldValue, int newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbarMarquees();
     }
 
     private void UpdateTaskbarMarquees()
     {
-        MainWindow mainWindow = (MainWindow)Application.Current.MainWindow;
-        var widget = mainWindow.taskbarWindow?.Widget;
-        if (widget == null) return;
-        widget.Dispatcher.Invoke(widget.UpdateMarquees);
+        if (Application.Current?.MainWindow is not MainWindow mainWindow) return;
+        foreach (var tw in mainWindow.taskbarWindows)
+        {
+            var widget = tw.Widget;
+            widget?.Dispatcher.Invoke(widget.UpdateMarquees);
+        }
     }
 
     partial void OnTaskbarVisualizerEnabledChanged(bool oldValue, bool newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         TaskbarVisualizerControl.OnTaskbarVisualizerEnabledChanged(newValue);
         UpdateTaskbar();
     }
 
     partial void OnTaskbarVisualizerBarCountChanged(int oldValue, int newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         Visualizer.ResizeBarList(newValue);
     }
 
     partial void OnTaskbarVisualizerLengthChanged(int oldValue, int newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbar(); // control resizes itself + bitmap via PropertyChanged; this only repositions it
     }
 
     partial void OnTaskbarVisualizerBeatGlowChanged(bool oldValue, bool newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         Application.Current?.Dispatcher?.BeginInvoke(() => FluentFlyout.Controls.TaskbarVisualizerControl.ApplyBeatGlow());
     }
 
@@ -1254,7 +1401,8 @@ public partial class UserSettings : ObservableObject
 
     partial void OnLyricsEnabledChanged(bool oldValue, bool newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbar();
     }
 
@@ -1266,7 +1414,8 @@ public partial class UserSettings : ObservableObject
 
     partial void OnLyricsWidthChanged(int oldValue, int newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         UpdateTaskbar();
     }
 
@@ -1280,16 +1429,23 @@ public partial class UserSettings : ObservableObject
 
     partial void OnTaskbarVisualizerBaselineChanged(bool oldValue, bool newValue)
     {
-        if (oldValue == newValue || _initializing || newValue == false) return;
-        TaskbarVisualizerHasContent = true;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
+        if (newValue)
+        {
+            TaskbarVisualizerHasContent = true;
+            GetMonitorSettings(TaskbarWidgetSelectedMonitor).TaskbarVisualizerHasContent = true;
+        }
     }
 
     partial void OnTaskbarVisualizerBaselineAutoHideChanged(bool oldValue, bool newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+        SyncActiveMonitorFromUserSettings();
         // If newValue is true, refresh the visualizer by hiding it:
         // if audio is playing, it will be shown again, if not, it will remain hidden.
         TaskbarVisualizerHasContent = !newValue;
+        GetMonitorSettings(TaskbarWidgetSelectedMonitor).TaskbarVisualizerHasContent = !newValue;
     }
 
     partial void OnUseAlbumArtAsAccentColorChanged(bool oldValue, bool newValue)

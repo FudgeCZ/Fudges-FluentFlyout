@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2024-2026 The FluentFlyout Authors
+// Copyright (c) 2024-2026 The FluentFlyout Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 using FluentFlyout.Classes.Settings;
@@ -129,7 +129,10 @@ internal static class ThemeManager
             if (Application.Current.MainWindow is not MainWindow mainWindow)
                 return;
 
-            mainWindow.taskbarWindow?.Widget?.ApplyWindowsTheme();
+            foreach (var tw in mainWindow.taskbarWindows)
+            {
+                tw.Widget?.ApplyWindowsTheme();
+            }
         });
     }
 }

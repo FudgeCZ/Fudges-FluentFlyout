@@ -4,6 +4,7 @@
 using FluentFlyout.Classes.Settings;
 using FluentFlyoutWPF.Classes;
 using FluentFlyoutWPF.Classes.Lyrics;
+using FluentFlyoutWPF.Models;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
@@ -16,7 +17,7 @@ namespace FluentFlyout.Controls;
 /// <summary>
 /// Taskbar lyrics widget: vertically scrolling synced lyrics shown next to the
 /// equalizer. Hidden completely when no lyrics are found. Right-click offers
-/// per-track provider switching. The view snaps to the active line with an eased
+/// per-track lyrics disabling. The view snaps to the active line with an eased
 /// animation; the active line pops (opacity + scale) and edges fade out.
 /// </summary>
 public partial class TaskbarLyricsControl : UserControl
@@ -61,6 +62,8 @@ public partial class TaskbarLyricsControl : UserControl
     private DispatcherTimer? _offsetHintTimer;
     private double _balancedRowTarget; // widest balanced row; one-row lines wider than this get force-split
 
+    internal MonitorTaskbarSettings Settings { get; private set; } = new();
+
     /// <summary>Whether the control currently has lyrics (or a search in progress) to display.</summary>
     public bool HasContent => Root.Visibility == Visibility.Visible && (_lines.Count > 0 || _loadingVisible);
 
@@ -71,17 +74,19 @@ public partial class TaskbarLyricsControl : UserControl
     {
         InitializeComponent();
 
-        Width = SettingsManager.Current.LyricsWidth;
         SetSmallTaskbarMode(false);
 
-        SettingsManager.Current.PropertyChanged += SettingsManager_PropertyChanged;
-        Unloaded += (_, _) => SettingsManager.Current.PropertyChanged -= SettingsManager_PropertyChanged;
+        BindMonitorSettings(SettingsManager.Current.GetMonitorSettings(0));
+        Unloaded += (_, _) => Settings.PropertyChanged -= Settings_PropertyChanged;
 
         LyricsService.Instance.LyricsChanged += OnLyricsServiceChanged;
         Unloaded += (_, _) => LyricsService.Instance.LyricsChanged -= OnLyricsServiceChanged;
 
         LyricsService.Instance.TrackDisabledStateChanged += OnTrackDisabledStateChanged;
         Unloaded += (_, _) => LyricsService.Instance.TrackDisabledStateChanged -= OnTrackDisabledStateChanged;
+
+        LyricsService.Instance.TrackOffsetChanged += OnTrackOffsetChanged;
+        Unloaded += (_, _) => LyricsService.Instance.TrackOffsetChanged -= OnTrackOffsetChanged;
 
         _tickTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
         _tickTimer.Tick += (_, _) => TickScroll();
@@ -118,6 +123,17 @@ public partial class TaskbarLyricsControl : UserControl
         };
     }
 
+    public void BindMonitorSettings(MonitorTaskbarSettings settings)
+    {
+        Settings.PropertyChanged -= Settings_PropertyChanged;
+        Settings = settings;
+        DataContext = settings;
+        Settings.PropertyChanged += Settings_PropertyChanged;
+
+        Width = Math.Clamp(Settings.LyricsWidth, 120, 400);
+        ApplyWidthFromSetting();
+    }
+
     private void ShowLoading()
     {
         if (!_awaitingResult)
@@ -148,15 +164,15 @@ public partial class TaskbarLyricsControl : UserControl
             ContentChanged?.Invoke();
     }
 
-    private void SettingsManager_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    private void Settings_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(SettingsManager.Current.LyricsWidth))
+        if (e.PropertyName == nameof(MonitorTaskbarSettings.LyricsWidth))
         {
             ApplyWidthFromSetting();
         }
-        else if (e.PropertyName == nameof(SettingsManager.Current.LyricsEnabled))
+        else if (e.PropertyName == nameof(MonitorTaskbarSettings.LyricsEnabled))
         {
-            if (SettingsManager.Current.LyricsEnabled)
+            if (Settings.LyricsEnabled)
                 SetTrack(_lastArtist, _lastTitle, _lastDuration); // re-fetch, nulls clear
             else
                 Clear();
@@ -172,7 +188,7 @@ public partial class TaskbarLyricsControl : UserControl
         _lastTitle = title;
         _lastDuration = duration;
 
-        if (!SettingsManager.Current.LyricsEnabled ||
+        if (!Settings.LyricsEnabled ||
             string.IsNullOrWhiteSpace(artist) ||
             string.IsNullOrWhiteSpace(title) ||
             LyricsService.Instance.IsTrackDisabled(artist, title))
@@ -217,7 +233,7 @@ public partial class TaskbarLyricsControl : UserControl
 
     /// <summary>
     /// Feeds the playback clock (position as of lastUpdated). Also drives the
-    /// pause-auto-hide: after <see cref="UserSettings.LyricsHidePausedAfterSeconds"/>
+    /// pause-auto-hide: after <see cref="MonitorTaskbarSettings.LyricsHidePausedAfterSeconds"/>
     /// of continuous pause the widget fades out, and it returns when playback resumes.
     /// </summary>
     public void SetClock(TimeSpan position, DateTime lastUpdated, bool playing)
@@ -250,6 +266,11 @@ public partial class TaskbarLyricsControl : UserControl
 
     private void OnLyricsServiceChanged()
     {
+        if (!Settings.LyricsEnabled)
+        {
+            Clear();
+            return;
+        }
         LoadLyrics(LyricsService.Instance.Current);
     }
 
@@ -262,10 +283,18 @@ public partial class TaskbarLyricsControl : UserControl
         {
             Clear();
         }
-        else if (SettingsManager.Current.LyricsEnabled && !HasContent && !_awaitingResult)
+        else if (Settings.LyricsEnabled && !HasContent && !_awaitingResult)
         {
             SetTrack(_lastArtist, _lastTitle, _lastDuration);
         }
+    }
+
+    private void OnTrackOffsetChanged()
+    {
+        if (string.IsNullOrWhiteSpace(_lastArtist) || string.IsNullOrWhiteSpace(_lastTitle))
+            return;
+
+        _trackOffsetMs = LyricsService.Instance.GetOffsetMs(_lastArtist, _lastTitle, _lastDuration);
     }
 
     private void DisableSongLyrics_Click(object sender, RoutedEventArgs e)
@@ -285,7 +314,7 @@ public partial class TaskbarLyricsControl : UserControl
         _pausedSince = null;
         _hiddenByPause = false;
 
-        if (result == null || result.Lines.Count == 0)
+        if (!Settings.LyricsEnabled || result == null || result.Lines.Count == 0)
         {
             Clear();
             return;
@@ -426,7 +455,7 @@ public partial class TaskbarLyricsControl : UserControl
     {
         if (_lines.Count == 0)
         {
-            Width = Math.Clamp(SettingsManager.Current.LyricsWidth, 120, 400);
+            Width = Math.Clamp(Settings.LyricsWidth, 120, 400);
             return;
         }
 
@@ -473,7 +502,7 @@ public partial class TaskbarLyricsControl : UserControl
             required = Math.Max(required, Math.Min(single, best));
         }
 
-        double floor = Math.Clamp(SettingsManager.Current.LyricsWidth, 120, 400);
+        double floor = Math.Clamp(Settings.LyricsWidth, 120, 400);
         // when the strip is pinned wide by the user's minimum, don't force extra wraps
         _balancedRowTarget = floor > required + 28 ? double.MaxValue : required;
         Width = Math.Clamp(required + 28, floor, 400); // +8 breathing over the content, +20 side margins
@@ -600,7 +629,7 @@ public partial class TaskbarLyricsControl : UserControl
         pos += TimeSpan.FromMilliseconds(_trackOffsetMs ?? SettingsManager.Current.LyricsOffsetMs);
 
         // pause auto-hide
-        int hideAfter = SettingsManager.Current.LyricsHidePausedAfterSeconds;
+        int hideAfter = Settings.LyricsHidePausedAfterSeconds;
         if (!_playing && hideAfter > 0)
         {
             _pausedSince ??= DateTime.Now;

@@ -4,6 +4,8 @@
 using FluentFlyout.Classes.Settings;
 using FluentFlyout.Classes.Utils;
 using FluentFlyoutWPF;
+using FluentFlyoutWPF.Models;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -76,6 +78,8 @@ public partial class TaskbarWidgetControl : UserControl
     private bool _isVertical;
     private bool _isSmallTaskbar;
 
+    internal MonitorTaskbarSettings Settings { get; private set; } = new();
+
     public TaskbarWidgetControl()
     {
         InitializeComponent();
@@ -83,8 +87,8 @@ public partial class TaskbarWidgetControl : UserControl
         // Apply Windows theme colors (independent of the app theme setting)
         ApplyWindowsTheme();
 
-        // Set DataContext for bindings
-        DataContext = SettingsManager.Current;
+        BindMonitorSettings(SettingsManager.Current.GetMonitorSettings(0));
+        Unloaded += (_, _) => Settings.PropertyChanged -= Settings_PropertyChanged;
 
         MainBorder.SizeChanged += (s, e) =>
         {
@@ -105,13 +109,56 @@ public partial class TaskbarWidgetControl : UserControl
         ReorderControls();
     }
 
+    public void BindMonitorSettings(MonitorTaskbarSettings settings)
+    {
+        Settings.PropertyChanged -= Settings_PropertyChanged;
+        Settings = settings;
+        DataContext = settings;
+        Settings.PropertyChanged += Settings_PropertyChanged;
+        ReorderControls();
+        UpdateMarquees();
+    }
+
+    private void Settings_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MonitorTaskbarSettings.TaskbarWidgetControlsPosition))
+        {
+            ReorderControls();
+        }
+        else if (e.PropertyName is nameof(MonitorTaskbarSettings.TaskbarWidgetScrollingEnabled)
+            or nameof(MonitorTaskbarSettings.TaskbarWidgetScrollingTextLoopForever)
+            or nameof(MonitorTaskbarSettings.TaskbarWidgetScrollingTextSpeed))
+        {
+            UpdateMarquees();
+        }
+        else if (e.PropertyName == nameof(MonitorTaskbarSettings.TaskbarWidgetProgressBarEnabled))
+        {
+            if (!Settings.TaskbarWidgetProgressBarEnabled || _progressDuration <= TimeSpan.Zero)
+            {
+                ProgressBarHost.Visibility = Visibility.Collapsed;
+                StopProgressTimer();
+            }
+            else
+            {
+                UpdateProgressFill();
+                SubscribeProgressRendering(_progressPlaying);
+            }
+        }
+        else if (e.PropertyName == nameof(MonitorTaskbarSettings.TaskbarWidgetTimeEnabled))
+        {
+            TimeText.Visibility = Settings.TaskbarWidgetTimeEnabled
+                && !_isVertical && !string.IsNullOrEmpty(_timeText)
+                ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
     public void ReorderControls()
     {
         // Remove ControlsStackPanel from MainStackPanel
         MainStackPanel.Children.Remove(ControlsStackPanel);
 
         // Reorder based on position setting
-        if (SettingsManager.Current.TaskbarWidgetControlsPosition == 0)
+        if (Settings.TaskbarWidgetControlsPosition == 0)
         {
             // Left: Controls, Image, Info
             MainStackPanel.Children.Insert(0, ControlsStackPanel);
@@ -146,7 +193,7 @@ public partial class TaskbarWidgetControl : UserControl
 
         // the time readout doesn't fit a vertical taskbar
         TimeText.Visibility = isVertical || string.IsNullOrEmpty(_timeText) ||
-            !SettingsManager.Current.TaskbarWidgetTimeEnabled
+            !Settings.TaskbarWidgetTimeEnabled
             ? Visibility.Collapsed : Visibility.Visible;
     }
 
@@ -280,10 +327,10 @@ public partial class TaskbarWidgetControl : UserControl
 
     private void MainBorder_MouseWheel(object sender, MouseWheelEventArgs e)
     {
-        if (SettingsManager.Current.TaskbarWidgetScrollVolumeMode != 0 && _mainWindow != null)
+        if (Settings.TaskbarWidgetScrollVolumeMode != 0 && _mainWindow != null)
         {
             float volumeDelta = Math.Clamp(e.Delta / 120f * TaskbarVolumeStep, -1f, 1f);
-            _mainWindow.AdjustTaskbarVolume(volumeDelta);
+            _mainWindow.AdjustTaskbarVolume(volumeDelta, Settings.TaskbarWidgetScrollVolumeMode);
         }
 
         e.Handled = true;
@@ -313,7 +360,7 @@ public partial class TaskbarWidgetControl : UserControl
         }
 
         // maximum width limit (default 240 matches Windows native widget)
-        int configuredMax = SettingsManager.Current.TaskbarWidgetMaxWidth;
+        int configuredMax = Settings.TaskbarWidgetMaxWidth;
         double maxLogicalWidth = Math.Clamp(configuredMax <= 0 ? 240 : configuredMax, 100, 600);
         double logicalWidth;
 
@@ -321,7 +368,7 @@ public partial class TaskbarWidgetControl : UserControl
         {
             logicalWidth = coverImageMargin;
         }
-        else if (SettingsManager.Current.TaskbarWidgetFixedWidth)
+        else if (Settings.TaskbarWidgetFixedWidth)
         {
             // pin to maximum width so right-aligned controls don't shift between songs
             logicalWidth = maxLogicalWidth;
@@ -358,7 +405,7 @@ public partial class TaskbarWidgetControl : UserControl
         }
 
         // add space for playback controls if enabled and visible
-        if (SettingsManager.Current.TaskbarWidgetControlsEnabled && ControlsStackPanel.Visibility == Visibility.Visible)
+        if (Settings.TaskbarWidgetControlsEnabled && ControlsStackPanel.Visibility == Visibility.Visible)
         {
             double controlsWidth = 0;
             foreach (var button in new[] { ShuffleButton, PreviousButton, PlayPauseButton, NextButton, RepeatButton })
@@ -371,7 +418,7 @@ public partial class TaskbarWidgetControl : UserControl
         }
 
         // add space for the time readout if enabled and showing something
-        if (SettingsManager.Current.TaskbarWidgetTimeEnabled && !_isVertical && !string.IsNullOrEmpty(_timeText))
+        if (Settings.TaskbarWidgetTimeEnabled && !_isVertical && !string.IsNullOrEmpty(_timeText))
         {
             logicalWidth += StringWidth.GetStringWidth(_timeText, 400) + TimeText.Margin.Left + TimeText.Margin.Right + 2;
         }
@@ -386,7 +433,7 @@ public partial class TaskbarWidgetControl : UserControl
         double titleAvailableWidth = double.IsNaN(SongTitleContainer.Width) ? 0 : SongTitleContainer.Width;
         double artistAvailableWidth = double.IsNaN(SongArtistContainer.Width) ? 0 : SongArtistContainer.Width;
 
-        bool isScrollingEnabled = SettingsManager.Current.TaskbarWidgetScrollingEnabled;
+        bool isScrollingEnabled = Settings.TaskbarWidgetScrollingEnabled;
 
         UpdateMarquee(SongTitle, SongTitleContainer, _cachedTitleWidth, titleAvailableWidth, isScrollingEnabled);
         UpdateMarquee(SongArtist, SongArtistContainer, _cachedArtistWidth, artistAvailableWidth, isScrollingEnabled);
@@ -396,8 +443,8 @@ public partial class TaskbarWidgetControl : UserControl
     {
         if (textBlock.RenderTransform as TranslateTransform is not { } transform) return;
 
-        int speed = SettingsManager.Current.TaskbarWidgetScrollingTextSpeed;
-        bool loopForever = SettingsManager.Current.TaskbarWidgetScrollingTextLoopForever;
+        int speed = Settings.TaskbarWidgetScrollingTextSpeed;
+        bool loopForever = Settings.TaskbarWidgetScrollingTextLoopForever;
         bool isTitle = textBlock == SongTitle;
         double containerWidth = container.Width;
 
@@ -589,7 +636,7 @@ public partial class TaskbarWidgetControl : UserControl
                 TimeText.Visibility = Visibility.Collapsed;
                 UpdateShuffleRepeat(null, null);
 
-                if (SettingsManager.Current.TaskbarWidgetHideCompletely)
+                if (Settings.TaskbarWidgetHideCompletely)
                 {
                     if (Visibility == Visibility.Visible && MainBorder.Opacity > 0)
                         SlideOutThenCollapse();
@@ -629,7 +676,7 @@ public partial class TaskbarWidgetControl : UserControl
         {
             ResetSlideOutState();
 
-            if (SettingsManager.Current.TaskbarWidgetControlsEnabled && playbackControls != null)
+            if (Settings.TaskbarWidgetControlsEnabled && playbackControls != null)
             {
                 // bridges (YT Music) can force availability even when SMTC doesn't report it
                 bool shuffleEnabled = _shuffleAvailableOverride ?? playbackControls.IsShuffleEnabled;
@@ -665,7 +712,7 @@ public partial class TaskbarWidgetControl : UserControl
             if (_actualTitle != newTitle || _actualArtist != newArtist)
             {
                 // changed info
-                if (SettingsManager.Current.TaskbarWidgetAnimated)
+                if (Settings.TaskbarWidgetAnimated)
                 {
                     AnimateEntrance();
                 }
@@ -677,7 +724,7 @@ public partial class TaskbarWidgetControl : UserControl
                 SongArtist.Text = _actualArtist;
 
                 // text swap animation: each line slides up and fades in
-                if (SettingsManager.Current.TaskbarWidgetAnimated)
+                if (Settings.TaskbarWidgetAnimated)
                 {
                     var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
                     var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(220)) { EasingFunction = ease };
@@ -699,7 +746,7 @@ public partial class TaskbarWidgetControl : UserControl
             _appVolume = _mainWindow?.GetActiveMediaAppVolume();
             UpdateSongInfoTooltip();
 
-            if (SettingsManager.Current.TaskbarWidgetControlsEnabled)
+            if (Settings.TaskbarWidgetControlsEnabled)
             {
                 PlayPauseButton.Icon = _isPaused ? new SymbolIcon(SymbolRegular.Play24, filled: true) : new SymbolIcon(SymbolRegular.Pause24, filled: true);
 
@@ -717,7 +764,7 @@ public partial class TaskbarWidgetControl : UserControl
 
             if (icon != null)
             {
-                if (_isPaused && SettingsManager.Current.TaskbarWidgetShowPauseOverlay)
+                if (_isPaused && Settings.TaskbarWidgetShowPauseOverlay)
                 { // show pause icon overlay (animated)
                     if (!_pauseOverlayShown)
                         AnimatePauseOverlay(true);
@@ -748,10 +795,10 @@ public partial class TaskbarWidgetControl : UserControl
                 ? Visibility.Visible
                 : Visibility.Collapsed;
             SongInfoStackPanel.Visibility = _isVertical ? Visibility.Collapsed : Visibility.Visible;
-            BackgroundImage.Visibility = SettingsManager.Current.TaskbarWidgetBackgroundBlur ? Visibility.Visible : Visibility.Collapsed;
+            BackgroundImage.Visibility = Settings.TaskbarWidgetBackgroundBlur ? Visibility.Visible : Visibility.Collapsed;
 
             // on top of XAML visibility binding (XAML binding only hides when disabled in settings)
-            ControlsStackPanel.Visibility = SettingsManager.Current.TaskbarWidgetControlsEnabled
+            ControlsStackPanel.Visibility = Settings.TaskbarWidgetControlsEnabled
                 ? Visibility.Visible
                 : Visibility.Collapsed;
 
@@ -805,7 +852,7 @@ public partial class TaskbarWidgetControl : UserControl
             translateTransform.BeginAnimation(TranslateTransform.XProperty, translateAnimation);
 
             // don't play ControlsStackPanel animation if it's not enabled
-            if (!SettingsManager.Current.TaskbarWidgetControlsEnabled)
+            if (!Settings.TaskbarWidgetControlsEnabled)
                 return;
 
             ControlsStackPanel.BeginAnimation(OpacityProperty, opacityAnimation);
@@ -897,7 +944,7 @@ public partial class TaskbarWidgetControl : UserControl
             _lastTimeText = text;
 
             TimeText.Text = text;
-            TimeText.Visibility = SettingsManager.Current.TaskbarWidgetTimeEnabled
+            TimeText.Visibility = Settings.TaskbarWidgetTimeEnabled
                 && !_isVertical && !string.IsNullOrEmpty(text)
                 ? Visibility.Visible : Visibility.Collapsed;
         });
@@ -914,7 +961,7 @@ public partial class TaskbarWidgetControl : UserControl
         _progressPlaying = playing;
         _progressDuration = duration;
 
-        if (!SettingsManager.Current.TaskbarWidgetProgressBarEnabled || duration <= TimeSpan.Zero)
+        if (!Settings.TaskbarWidgetProgressBarEnabled || duration <= TimeSpan.Zero)
         {
             ProgressBarHost.Visibility = Visibility.Collapsed;
             StopProgressTimer();
@@ -1075,7 +1122,7 @@ public partial class TaskbarWidgetControl : UserControl
     // Event handlers for context menu items
     private void ContextMenu_Opened(object sender, RoutedEventArgs e)
     {
-        bool canToggleLyrics = SettingsManager.Current.LyricsEnabled &&
+        bool canToggleLyrics = Settings.LyricsEnabled &&
             (!string.IsNullOrWhiteSpace(_actualArtist) || !string.IsNullOrWhiteSpace(_actualTitle));
 
         ContextMenuToggleSongLyrics.Visibility = canToggleLyrics ? Visibility.Visible : Visibility.Collapsed;
@@ -1106,6 +1153,7 @@ public partial class TaskbarWidgetControl : UserControl
 
     private void ContextMenuSettings_Click(object sender, RoutedEventArgs e)
     {
+        SettingsManager.Current.TaskbarWidgetSelectedMonitor = Settings.MonitorIndex;
         SettingsWindow.ShowInstance();
     }
 }

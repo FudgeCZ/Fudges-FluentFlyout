@@ -5,6 +5,8 @@ using FluentFlyout.Classes.Settings;
 using FluentFlyoutWPF;
 using FluentFlyoutWPF.Classes;
 using FluentFlyoutWPF.Classes.Utils;
+using FluentFlyoutWPF.Models;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
@@ -46,14 +48,22 @@ public partial class TaskbarWindow : Window
     private GlobalSystemMediaTransportControlsSessionPlaybackStatus? _lastPlaybackStatus;
     private DispatcherTimer? _autoHideTimer;
 
-    public TaskbarWindow()
+    public int MonitorIndex { get; }
+    public MonitorTaskbarSettings MonitorSettings => SettingsManager.Current.GetMonitorSettings(MonitorIndex);
+
+    public TaskbarWindow(int monitorIndex = 0)
     {
+        MonitorIndex = monitorIndex;
         WindowHelper.SetNoActivate(this);
         InitializeComponent();
         WindowHelper.SetTopmost(this);
 
-        // Set DataContext for bindings
-        DataContext = SettingsManager.Current;
+        var settings = MonitorSettings;
+        DataContext = settings;
+        Widget.BindMonitorSettings(settings);
+        TaskbarVisualizer.BindMonitorSettings(settings);
+        Lyrics.BindMonitorSettings(settings);
+        settings.PropertyChanged += MonitorSettings_PropertyChanged;
 
         _timer = new DispatcherTimer();
         _timer.Interval = TimeSpan.FromMilliseconds(1500); // slow auto-update for display changes
@@ -61,6 +71,26 @@ public partial class TaskbarWindow : Window
         _timer.Start();
 
         Show();
+    }
+
+    private void MonitorSettings_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (_isClosing)
+            return;
+
+        if (e.PropertyName is nameof(MonitorTaskbarSettings.TaskbarWidgetPosition)
+            or nameof(MonitorTaskbarSettings.TaskbarWidgetPadding)
+            or nameof(MonitorTaskbarSettings.TaskbarWidgetManualPadding)
+            or nameof(MonitorTaskbarSettings.TaskbarWidgetMaxWidth)
+            or nameof(MonitorTaskbarSettings.TaskbarWidgetFixedWidth)
+            or nameof(MonitorTaskbarSettings.TaskbarVisualizerEnabled)
+            or nameof(MonitorTaskbarSettings.TaskbarVisualizerPosition)
+            or nameof(MonitorTaskbarSettings.TaskbarVisualizerLength)
+            or nameof(MonitorTaskbarSettings.LyricsEnabled)
+            or nameof(MonitorTaskbarSettings.LyricsWidth))
+        {
+            UpdatePosition();
+        }
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -101,16 +131,6 @@ public partial class TaskbarWindow : Window
             case 0x0282: // WM_IME_NOTIFY
                 handled = true;
                 return IntPtr.Zero;
-
-                // Handle other known harmless messages that are sent when FluentFlyout starts, Windows locks, etc.
-                // Needs testing
-                //case 0x0047:
-                //case 0x02B1:
-                //case 0x001E:
-                //case 0x0164:
-                //case 0xC25F:
-                //    handled = true;
-                //    return IntPtr.Zero;
         }
 
         return IntPtr.Zero;
@@ -128,41 +148,29 @@ public partial class TaskbarWindow : Window
     private IntPtr GetSelectedTaskbarHandle(out bool isMainTaskbarSelected)
     {
         var monitors = MonitorUtil.GetMonitors();
-        var selectedMonitor = monitors[Math.Clamp(SettingsManager.Current.TaskbarWidgetSelectedMonitor, 0, monitors.Count - 1)];
-        isMainTaskbarSelected = true;
-
-        // Get the main taskbar and check if it is on the selected monitor.
-        var mainHwnd = FindWindow("Shell_TrayWnd", null);
-        if (MonitorUtil.GetMonitor(mainHwnd).deviceId == selectedMonitor.deviceId)
-            return mainHwnd;
-
-        if (monitors.Count == 1)
-            return mainHwnd;
-
         isMainTaskbarSelected = false;
-        if (monitors.Count == 2)
+        if (monitors.Count == 0 || MonitorIndex < 0 || MonitorIndex >= monitors.Count)
+            return IntPtr.Zero;
+
+        var selectedMonitor = monitors[MonitorIndex];
+
+        // Get the main taskbar and check if it is on this window's monitor.
+        var mainHwnd = FindWindow("Shell_TrayWnd", null);
+        if (mainHwnd != IntPtr.Zero && MonitorUtil.GetMonitor(mainHwnd).deviceId == selectedMonitor.deviceId)
         {
-            var hwnd = FindWindow("Shell_SecondaryTrayWnd", null);
-            if (MonitorUtil.GetMonitor(hwnd).deviceId == selectedMonitor.deviceId)
-            {
-                return hwnd;
-            }
-            else
-            {
-                isMainTaskbarSelected = true;
-                return mainHwnd;
-            }
+            isMainTaskbarSelected = true;
+            return mainHwnd;
         }
 
-        // If there are more than two monitors, we will need to enumerate all existing windows
-        // to find all Shell_SecondaryTrayWnd among them.
+        if (monitors.Count == 1)
+            return IntPtr.Zero;
 
         IntPtr secondHwnd = IntPtr.Zero;
         StringBuilder className = new(256); // 256 is the maximum class name length
         IntPtr checkWindowClass(IntPtr wnd)
         {
             var len = GetClassName(wnd, className, className.Capacity);
-            if (className.Equals("Shell_SecondaryTrayWnd"))
+            if (len > 0 && className.Equals("Shell_SecondaryTrayWnd"))
             {
                 if (MonitorUtil.GetMonitor(wnd).deviceId == selectedMonitor.deviceId)
                 {
@@ -172,9 +180,7 @@ public partial class TaskbarWindow : Window
             return IntPtr.Zero;
         }
 
-        // Get the threadId of the main taskbar and check all windows created in the same thread.
-        // This is very fast, but in some cases Shell_TrayWnd and other Shell_SecondaryTrayWnd's may be created in different threads.
-        // Actually, I couldn't achieve that kind of behavior.
+        // First check windows in the main taskbar's thread (fast path).
         if (mainHwnd != IntPtr.Zero)
         {
             uint threadId = GetWindowThreadProcessId(mainHwnd, IntPtr.Zero);
@@ -191,8 +197,7 @@ public partial class TaskbarWindow : Window
                 return secondHwnd;
         }
 
-        // If for some reason the taskbars were created in different threads or simply could not be found,
-        // we try to find them among all existing windows.
+        // Fallback: enumerate all top-level windows to find Shell_SecondaryTrayWnd on this monitor.
         EnumWindows((wnd, param) =>
         {
             secondHwnd = checkWindowClass(wnd);
@@ -202,12 +207,7 @@ public partial class TaskbarWindow : Window
             return true;
         }, IntPtr.Zero);
 
-        if (secondHwnd != IntPtr.Zero)
-            return secondHwnd;
-
-        // Logger.Debug($"No taskbar found on the selected monitor. Using the main taskbar.");
-        isMainTaskbarSelected = true;
-        return mainHwnd;
+        return secondHwnd;
     }
 
     private void SetupWindow()
@@ -217,17 +217,21 @@ public partial class TaskbarWindow : Window
             var interop = new WindowInteropHelper(this);
             IntPtr taskbarWindowHandle = interop.Handle;
 
-            //Background = _hitTestTransparent; // ensures that non-content areas also trigger MouseEnter event
-
             IntPtr taskbarHandle = GetSelectedTaskbarHandle(out bool isMainTaskbarSelected);
             ResetTaskbarCachesIfHandleChanged(taskbarHandle);
+
+            if (taskbarHandle == IntPtr.Zero)
+            {
+                Visibility = Visibility.Collapsed;
+                return;
+            }
 
             // This prevents the window from trying to float above the taskbar as a separate entity
             int style = GetWindowLong(taskbarWindowHandle, GWL_STYLE);
             style = (style & ~WS_POPUP) | WS_CHILD;
             SetWindowLong(taskbarWindowHandle, GWL_STYLE, style);
 
-            SetParent(taskbarWindowHandle, taskbarHandle); // if this window is created faster than the Taskbar is loaded, then taskbarHandle will be NULL.
+            SetParent(taskbarWindowHandle, taskbarHandle);
 
             CalculateAndSetPosition(taskbarHandle, taskbarWindowHandle, isMainTaskbarSelected);
         }
@@ -269,29 +273,17 @@ public partial class TaskbarWindow : Window
             goto on_error;
         }
 
-        // Simple debugging to display the window region:
-#if false
-        var whiteRect = WidgetCanvas.Children.Cast<FrameworkElement>().FirstOrDefault(e => e.Name == "test_border");
-        if (whiteRect == null)
-        {
-            whiteRect = new System.Windows.Shapes.Rectangle() { Name = "test_border", Width = 20000, Height = 20000, Fill = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Colors.Black) };
-            WidgetCanvas.Children.Add(whiteRect);
-            Canvas.SetLeft(whiteRect, -10000);
-            Canvas.SetTop(whiteRect, -10000);
-        }
-#endif
-
         return;
 
 on_error:
 
-// All regions that were not sent without errors to SetWindowRgn must be destroyed manually
+        // All regions that were not sent without errors to SetWindowRgn must be destroyed manually
         DeleteObject(rgn);
         if (SetWindowRgn(windowHandle, IntPtr.Zero, true) == 0)
             Logger.Error("Taskbar Widget error during window region reset.");
     }
 
-    private void UpdatePosition()
+    public void UpdatePosition()
     {
         if (_isClosing || MainWindow.ExplorerRestarting)
         {
@@ -300,7 +292,7 @@ on_error:
         }
 
         // Check premium status before allowing widget to be displayed
-        if (!SettingsManager.Current.TaskbarWidgetEnabled || !SettingsManager.Current.IsPremiumUnlocked)
+        if (!MonitorSettings.TaskbarWidgetEnabled || !SettingsManager.Current.IsPremiumUnlocked)
             return;
 
         try
@@ -332,6 +324,20 @@ on_error:
                 }, DispatcherPriority.Background);
 
                 return;
+            }
+
+            if (taskbarHandle == IntPtr.Zero)
+            {
+                Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            // Ensure WS_CHILD is set before parenting into the taskbar
+            int style = GetWindowLong(interop.Handle, GWL_STYLE);
+            if ((style & WS_CHILD) == 0)
+            {
+                style = (style & ~WS_POPUP) | WS_CHILD;
+                SetWindowLong(interop.Handle, GWL_STYLE, style);
             }
 
             // If the Taskbar was not found during initialization or another taskbar was selected,
@@ -449,7 +455,7 @@ on_error:
 
             UpdateWindowRegion(taskbarWindowHandle, wRect, vRect, lRect);
 
-            _lastSelectedMonitor = SettingsManager.Current.TaskbarWidgetSelectedMonitor;
+            _lastSelectedMonitor = MonitorIndex;
         }
         finally
         {
@@ -459,7 +465,8 @@ on_error:
 
     private Rect PositionWidget(IntPtr taskbarHandle, RECT taskbarRect, double dpiScale, bool isMainTaskbarSelected, bool isVertical, bool lyricsVisible)
     {
-        if (!SettingsManager.Current.TaskbarWidgetEnabled)
+        var settings = MonitorSettings;
+        if (!settings.TaskbarWidgetEnabled)
             return Rect.Empty;
 
         Widget.SetVerticalMode(isVertical);
@@ -477,11 +484,6 @@ on_error:
         Widget.LayoutTransform = isVertical ? new System.Windows.Media.RotateTransform(90) : null;
         Widget.RenderTransform = System.Windows.Media.Transform.Identity;
 
-        // On a vertical taskbar the widget is rotated 90°, so the axes flip:
-        //   primarySize = taskbarHeight, positioning runs along Y
-        //   crossSize   = taskbarWidth,  widget is centered along X
-        //   physicalWidth  = visual extent along primary axis (logical width = visual height after rotation)
-        //   physicalHeight = visual extent along cross axis   (logical height = visual width after rotation)
         int primarySize = isVertical ? taskbarHeight : taskbarWidth;
         int crossSize = isVertical ? taskbarWidth : taskbarHeight;
 
@@ -491,19 +493,19 @@ on_error:
         // Primary axis position (calculated per-case below)
         int primaryPos = 0;
 
-        switch (SettingsManager.Current.TaskbarWidgetPosition)
+        switch (settings.TaskbarWidgetPosition)
         {
             case 0: // near start (left for horizontal, top for vertical)
                 primaryPos = 20;
 
-                if (SettingsManager.Current.TaskbarVisualizerEnabled && SettingsManager.Current.TaskbarVisualizerPosition == 0)
+                if (settings.TaskbarVisualizerEnabled && settings.TaskbarVisualizerPosition == 0)
                     primaryPos += (int)(TaskbarVisualizer.Width * dpiScale) + 4;
 
                 // lyrics sit on the outer side of the visualizer chain (same side rules)
-                if (lyricsVisible && SettingsManager.Current.TaskbarVisualizerPosition == 0)
+                if (lyricsVisible && settings.TaskbarVisualizerPosition == 0)
                     primaryPos += (int)(Lyrics.Width * dpiScale) + 4;
 
-                if (!SettingsManager.Current.TaskbarWidgetPadding)
+                if (!settings.TaskbarWidgetPadding)
                     break;
 
                 // automatic widget padding to the start
@@ -536,14 +538,14 @@ on_error:
             case 1: // center of the taskbar
                 primaryPos = (primarySize - physicalWidth) / 2;
 
-                if (SettingsManager.Current.TaskbarVisualizerEnabled)
-                    if (SettingsManager.Current.TaskbarVisualizerPosition == 0)
+                if (settings.TaskbarVisualizerEnabled)
+                    if (settings.TaskbarVisualizerPosition == 0)
                         primaryPos += (int)(TaskbarVisualizer.Width * dpiScale) / 2 + 4;
                     else
                         primaryPos -= (int)(TaskbarVisualizer.Width * dpiScale) / 2 - 4;
 
                 if (lyricsVisible)
-                    if (SettingsManager.Current.TaskbarVisualizerPosition == 0)
+                    if (settings.TaskbarVisualizerPosition == 0)
                         primaryPos += (int)(Lyrics.Width * dpiScale) / 2 + 4;
                     else
                         primaryPos -= (int)(Lyrics.Width * dpiScale) / 2 + 4;
@@ -552,14 +554,14 @@ on_error:
             case 2: // near end (right for horizontal, bottom for vertical)
                 try
                 {
-                    if (SettingsManager.Current.TaskbarVisualizerEnabled && SettingsManager.Current.TaskbarVisualizerPosition == 1)
+                    if (settings.TaskbarVisualizerEnabled && settings.TaskbarVisualizerPosition == 1)
                         primaryPos -= (int)(TaskbarVisualizer.Width * dpiScale) - 4;
 
-                    if (lyricsVisible && SettingsManager.Current.TaskbarVisualizerPosition == 1)
+                    if (lyricsVisible && settings.TaskbarVisualizerPosition == 1)
                         primaryPos -= (int)(Lyrics.Width * dpiScale) + 4;
 
                     // Horizontal only: try to position next to native Widgets button on the end side
-                    if (!isVertical && SettingsManager.Current.TaskbarWidgetPadding)
+                    if (!isVertical && settings.TaskbarWidgetPadding)
                     {
                         try
                         {
@@ -610,7 +612,7 @@ on_error:
                         }
 
                         // Primary taskbar: TrayNotifyWnd (original approach for horizontal, fallback for vertical)
-                        if (_trayHandle == IntPtr.Zero || _lastSelectedMonitor != SettingsManager.Current.TaskbarWidgetSelectedMonitor)
+                        if (_trayHandle == IntPtr.Zero || _lastSelectedMonitor != MonitorIndex)
                             _trayHandle = FindWindowEx(taskbarHandle, IntPtr.Zero, "TrayNotifyWnd", null);
 
                         if (_trayHandle != IntPtr.Zero)
@@ -649,7 +651,7 @@ on_error:
                 break;
         }
 
-        primaryPos += SettingsManager.Current.TaskbarWidgetManualPadding;
+        primaryPos += settings.TaskbarWidgetManualPadding;
 
         // Set widget position within canvas
         // primaryPos → left (horizontal) or top (vertical); crossPos → top (horizontal) or left (vertical)
@@ -666,7 +668,8 @@ on_error:
 
     private Rect PositionVisualizer(IntPtr taskbarHandle, RECT taskbarRect, double dpiScale, bool isMainTaskbarSelected, bool isVertical)
     {
-        if (!SettingsManager.Current.TaskbarVisualizerEnabled)
+        var settings = MonitorSettings;
+        if (!settings.TaskbarVisualizerEnabled)
             return Rect.Empty;
 
         // Rotate visualizer 90° on vertical taskbar so it fits the slim width
@@ -675,21 +678,14 @@ on_error:
         int taskbarHeight = taskbarRect.Bottom - taskbarRect.Top;
         int taskbarWidth = taskbarRect.Right - taskbarRect.Left;
 
-        // TaskbarVisualizer.Height (40) is the cross-axis extent for both orientations:
-        //   horizontal: actual height = 40, centered vertically (-1 to match native element alignment)
-        //   vertical:   visual width after rotation = 40, centered horizontally
         int crossSize = isVertical ? taskbarWidth : taskbarHeight;
         int crossOffset = isVertical ? 0 : -1; // -1 aligns with native taskbar elements on horizontal
         int crossPos = (crossSize - (int)(TaskbarVisualizer.Height * dpiScale)) / 2 + crossOffset;
 
-        // TaskbarVisualizer.Width (84) is the primary-axis extent for both orientations:
-        //   horizontal: actual width = 84
-        //   vertical:   visual height after rotation = 84
-        // Position adjacent to the widget along the primary axis
         double widgetPrimaryStart = isVertical ? Canvas.GetTop(Widget) : Canvas.GetLeft(Widget);
         int primaryPos;
 
-        switch (SettingsManager.Current.TaskbarVisualizerPosition)
+        switch (settings.TaskbarVisualizerPosition)
         {
             case 0: // before widget (left for horizontal, above for vertical)
                 primaryPos = (int)(widgetPrimaryStart * dpiScale) - (int)(TaskbarVisualizer.Width * dpiScale);
@@ -718,7 +714,8 @@ on_error:
 
     private Rect PositionLyrics(IntPtr taskbarHandle, RECT taskbarRect, double dpiScale, bool isMainTaskbarSelected, bool isVertical)
     {
-        if (!SettingsManager.Current.LyricsEnabled || !Lyrics.HasContent)
+        var settings = MonitorSettings;
+        if (!settings.LyricsEnabled || !Lyrics.HasContent)
             return Rect.Empty;
 
         // rotate like the visualizer on vertical taskbars
@@ -734,10 +731,10 @@ on_error:
         // lyrics sit on the outer side of the visualizer chain: [lyrics][viz][widget]
         // or [widget][viz][lyrics]; when the visualizer is disabled, lyrics takes its slot
         double widgetPrimaryStart = isVertical ? Canvas.GetTop(Widget) : Canvas.GetLeft(Widget);
-        bool onStartSide = SettingsManager.Current.TaskbarVisualizerPosition == 0;
+        bool onStartSide = settings.TaskbarVisualizerPosition == 0;
 
         int lyrWidth = (int)(Lyrics.Width * dpiScale);
-        bool vizEnabled = SettingsManager.Current.TaskbarVisualizerEnabled;
+        bool vizEnabled = settings.TaskbarVisualizerEnabled;
         int widgetExtent = (int)(Widget.Width * dpiScale);
 
         int primaryPos;
@@ -762,8 +759,9 @@ on_error:
 
     public void UpdateUi(string title, string artist, BitmapImage? icon, GlobalSystemMediaTransportControlsSessionPlaybackStatus? playbackStatus, GlobalSystemMediaTransportControlsSessionPlaybackControls? playbackControls = null)
     {
+        var settings = MonitorSettings;
         // Check premium status - hide widget if not unlocked
-        if ((!SettingsManager.Current.TaskbarWidgetEnabled || !SettingsManager.Current.IsPremiumUnlocked))
+        if (!settings.TaskbarWidgetEnabled || !SettingsManager.Current.IsPremiumUnlocked)
         {
             if (_timer.IsEnabled) // pause timer to save resources
                 _timer.Stop();
@@ -778,7 +776,7 @@ on_error:
         // Autohide - Widget hides when playback is paused
         _lastPlaybackStatus = playbackStatus;
 
-        if ((SettingsManager.Current.TaskbarWidgetAutoHide))
+        if (settings.TaskbarWidgetAutoHide)
         {
             if (playbackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
             {
@@ -829,7 +827,8 @@ on_error:
 
         Dispatcher.Invoke(() =>
         {
-            Visibility = Visibility.Visible;
+            if (GetSelectedTaskbarHandle(out _) != IntPtr.Zero)
+                Visibility = Visibility.Visible;
         });
     }
 
@@ -846,7 +845,7 @@ on_error:
         try
         {
             // reset if monitor changed
-            if (_lastSelectedMonitor != SettingsManager.Current.TaskbarWidgetSelectedMonitor)
+            if (_lastSelectedMonitor != MonitorIndex)
                 elementCache = null;
 
             // find widget in XAML
@@ -935,12 +934,6 @@ on_error:
         }
     }
 
-    /// <summary>
-    /// Attempts to locate the Windows taskbar widgets button and retrieves its bounding rectangle.
-    /// </summary>
-    /// <returns>A tuple where the first value indicates whether the widgets button was found (<see langword="true"/> if found;
-    /// otherwise, <see langword="false"/>), and the second value is the bounding rectangle of the button if found, or
-    /// <see cref="Rect.Empty"/> if not found.</returns>
     private (bool, Rect) GetTaskbarWidgetRect(IntPtr taskbarHandle)
     {
         return GetTaskbarXamlElementRect(taskbarHandle, ref _widgetElement, "WidgetsButton");
@@ -959,6 +952,7 @@ on_error:
     protected override void OnClosed(EventArgs e)
     {
         _isClosing = true;
+        MonitorSettings.PropertyChanged -= MonitorSettings_PropertyChanged;
         _timer.Stop();
         _autoHideTimer?.Stop();
         _autoHideTimer = null;

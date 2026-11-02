@@ -3,6 +3,8 @@
 
 using FluentFlyout.Classes.Settings;
 using FluentFlyout.Classes.Utils;
+using FluentFlyout.Controls;
+using FluentFlyoutWPF.Models;
 using Microsoft.Win32;
 using NAudio.CoreAudioApi;
 using NAudio.Dsp;
@@ -21,7 +23,7 @@ namespace FluentFlyoutWPF.Classes
 
         // Keep at 2: only an exact 2:1 minification turns WPF's default Linear
         // filter into a true box average. Other factors discard the supersampling.
-        private const int Supersample = 2;
+        internal const int Supersample = 2;
 
         // TaskbarVisualizerControl's Image has Margin="4,0", so the drawable content
         // is the control length minus 8 (upstream default: 84 - 8 = 76).
@@ -29,16 +31,12 @@ namespace FluentFlyoutWPF.Classes
         private const int MinContentWidth = 24;
         private const int MaxContentWidth = 292;
 
-        private int ImageWidth = 76 * Supersample;
-        private readonly int ImageHeight = 32 * Supersample;
-        private readonly int BarSpacing = 2 * Supersample;
+        internal const int ImageHeight = 32 * Supersample;
+        private const int BarSpacing = 2 * Supersample;
 
         private WasapiLoopbackCapture? _capture;
         private MMDevice? _renderDevice;
-        private static float[]? _barValues;
-        private WriteableBitmap? _bitmap;
         private bool _isRunning;
-        private readonly object _lock = new();
 
         private readonly int _fftLength = 4096;
         private int _fftPos = 0;
@@ -51,36 +49,6 @@ namespace FluentFlyoutWPF.Classes
         private DateTime _lastDataAvailableUtc = DateTime.MinValue;
         private int _restartInProgress; // 0=false, 1=true (Interlocked)
         private string? _deviceId; // track current device ID for restart logic
-
-        private readonly struct BarGeometry
-        {
-            public readonly float Left, Right, Top, Bottom;
-            public readonly float InnerLeft, InnerRight, InnerTop, InnerBottom;
-
-            public BarGeometry(int x, int width, int y, int endY, float radius)
-            {
-                Left = x;
-                Right = x + width;
-                Top = y;
-                Bottom = endY;
-
-                InnerLeft = Left + radius;
-                InnerRight = Right - radius;
-                InnerTop = Top + radius;
-                InnerBottom = Bottom - radius;
-            }
-        }
-
-        public WriteableBitmap? Bitmap
-        {
-            get
-            {
-                lock (_lock)
-                {
-                    return _bitmap;
-                }
-            }
-        }
 
         /// <summary>
         /// Smoothed 0..1 energy of the low-frequency bars, for beat-reactive effects.
@@ -104,15 +72,19 @@ namespace FluentFlyoutWPF.Classes
 
         public Visualizer()
         {
-            ImageWidth = ContentWidthFromLength(SettingsManager.Current.TaskbarVisualizerLength);
-            InitializeBitmap();
-
             _fftBuffer = new Complex[_fftLength];
 
-            ResizeBarList(SettingsManager.Current.TaskbarVisualizerBarCount);
             AudioDeviceMonitor.Instance.DefaultDeviceChanged += OnDefaultDeviceChanged;
             TryRegisterSystemEvents();
         }
+
+        internal static int ContentWidthFromLength(int controlLength)
+        {
+            return Math.Clamp(controlLength - ControlHorizontalMargin, MinContentWidth, MaxContentWidth) * Supersample;
+        }
+
+        private static bool IsAnyVisualizerEnabled() =>
+            TaskbarVisualizerControl.HasAnyEnabledInstance() || SettingsManager.Current.TaskbarVisualizerEnabled;
 
         private void TryRegisterSystemEvents()
         {
@@ -123,7 +95,6 @@ namespace FluentFlyoutWPF.Classes
             }
             catch (Exception ex)
             {
-                // On some environments (e.g. non-interactive sessions), SystemEvents may not be available.
                 Logger.Warn(ex, "Failed to register SystemEvents handlers for visualizer auto-restart");
             }
         }
@@ -143,11 +114,9 @@ namespace FluentFlyoutWPF.Classes
 
         private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
         {
-            if (!SettingsManager.Current.TaskbarVisualizerEnabled)
+            if (!IsAnyVisualizerEnabled())
                 return;
 
-            // When unlocking after device disconnect (e.g. Bluetooth earbuds), WASAPI loopback can get stuck.
-            // Restart capture on unlock / logon to recover without user action.
             if (e.Reason == SessionSwitchReason.SessionUnlock || e.Reason == SessionSwitchReason.SessionLogon)
             {
                 RequestRestart($"session switch: {e.Reason}");
@@ -156,7 +125,7 @@ namespace FluentFlyoutWPF.Classes
 
         private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
         {
-            if (!SettingsManager.Current.TaskbarVisualizerEnabled)
+            if (!IsAnyVisualizerEnabled())
                 return;
 
             if (e.Mode == PowerModes.Resume)
@@ -165,31 +134,18 @@ namespace FluentFlyoutWPF.Classes
             }
         }
 
-        private void InitializeBitmap()
-        {
-            Application.Current.Dispatcher.Invoke(() =>
-            {
-                lock (_lock)
-                {
-                    _bitmap = new WriteableBitmap(ImageWidth, ImageHeight, 96, 96, PixelFormats.Bgra32, null);
-                }
-            });
-        }
-
         private void OnDefaultDeviceChanged(object? sender, DefaultDeviceChangedEventArgs e)
         {
             _deviceId = e.DeviceId;
 
-            // Even if capture isn't currently running (e.g. restart attempt failed while the device was reconfiguring),
-            // we still want to try restarting as soon as Windows reports a usable default endpoint again.
-            if (!SettingsManager.Current.TaskbarVisualizerEnabled)
+            if (!IsAnyVisualizerEnabled())
                 return;
             RequestRestart("default audio output device changed");
         }
 
         private void RequestRestart(string reason)
         {
-            if (!SettingsManager.Current.TaskbarVisualizerEnabled)
+            if (!IsAnyVisualizerEnabled())
                 return;
 
             if (Interlocked.Exchange(ref _restartInProgress, 1) == 1)
@@ -225,8 +181,7 @@ namespace FluentFlyoutWPF.Classes
 
         public static void ResizeBarList(int newBarCount)
         {
-            BarCount = newBarCount;
-            _barValues = new float[BarCount];
+            BarCount = Math.Clamp(newBarCount, 1, 64);
         }
 
         /// <summary>
@@ -240,30 +195,10 @@ namespace FluentFlyoutWPF.Classes
                 return;
 
             TargetApp = next;
-            if (SettingsManager.Current.TaskbarVisualizerEnabled)
+            if (IsAnyVisualizerEnabled())
             {
-                FluentFlyout.Controls.TaskbarVisualizerControl.SharedVisualizer?
-                    .RequestRestart("visualizer target app changed");
+                TaskbarVisualizerControl.SharedVisualizer?.RequestRestart("visualizer target app changed");
             }
-        }
-
-        private static int ContentWidthFromLength(int controlLength)
-        {
-            return Math.Clamp(controlLength - ControlHorizontalMargin, MinContentWidth, MaxContentWidth) * Supersample;
-        }
-
-        /// <summary>
-        /// Resizes the bitmap to match a new visualizer control length (recreating it;
-        /// the control must reassign its Image.Source afterwards).
-        /// </summary>
-        public void SetLength(int controlLength)
-        {
-            int newWidth = ContentWidthFromLength(controlLength);
-            if (newWidth == ImageWidth)
-                return;
-
-            ImageWidth = newWidth;
-            InitializeBitmap();
         }
 
         public void Start()
@@ -271,12 +206,8 @@ namespace FluentFlyoutWPF.Classes
             if (_isRunning)
                 return;
 
-            float barCount = BarCount >= 0 ? BarCount : 8;
-            _barValues = new float[(int)barCount];
-
             try
             {
-                // whole-system loopback on the default render endpoint
                 _renderDevice?.Dispose();
                 _renderDevice = string.IsNullOrWhiteSpace(_deviceId)
                      ? AudioDeviceMonitor.Instance.GetDefaultRenderDevice()
@@ -303,7 +234,6 @@ namespace FluentFlyoutWPF.Classes
 
         private void StartWatchdog()
         {
-            // automatic update timer in case audio data is not updated
             _captureWatchdog = new(500)
             {
                 AutoReset = false
@@ -316,21 +246,24 @@ namespace FluentFlyoutWPF.Classes
             if (!_isRunning)
                 return;
 
+            var controls = TaskbarVisualizerControl.GetActiveInstances();
             lock (_dataLock)
             {
-                for (int i = 0; i < _barValues.Length; i++)
-                {
-                    _barValues[i] = 0;
-                }
                 CurrentEnergy = 0;
-                UpdateBitmap();
+                foreach (var ctrl in controls)
+                {
+                    ctrl.ClearBarsToSilence();
+                    RenderControlBitmap(ctrl);
+                }
             }
 
-            if (!SettingsManager.Current.TaskbarVisualizerBaseline || SettingsManager.Current.TaskbarVisualizerBaselineAutoHide) // if baseline is enabled and autohide is off, condition is false
-                SettingsManager.Current.TaskbarVisualizerHasContent = false;
+            foreach (var ctrl in controls)
+            {
+                var s = ctrl.Settings;
+                if (!s.TaskbarVisualizerBaseline || s.TaskbarVisualizerBaselineAutoHide)
+                    s.TaskbarVisualizerHasContent = false;
+            }
 
-            // If we stop receiving loopback callbacks entirely (common after lock/unlock + device changes),
-            // the timer fires once and then never again. Use it as a recovery trigger.
             var silenceFor = DateTime.UtcNow - _lastDataAvailableUtc;
             if (silenceFor > TimeSpan.FromSeconds(2))
             {
@@ -345,11 +278,14 @@ namespace FluentFlyoutWPF.Classes
 
             _isRunning = false;
 
-            _capture?.DataAvailable -= OnDataAvailable;
-            _capture?.RecordingStopped -= OnRecordingStopped;
-            _capture?.StopRecording();
-            _capture?.Dispose();
-            _capture = null;
+            if (_capture != null)
+            {
+                _capture.DataAvailable -= OnDataAvailable;
+                _capture.RecordingStopped -= OnRecordingStopped;
+                _capture.StopRecording();
+                _capture.Dispose();
+                _capture = null;
+            }
 
             _renderDevice?.Dispose();
             _renderDevice = null;
@@ -368,10 +304,6 @@ namespace FluentFlyoutWPF.Classes
             HandleAudioData(e.Buffer, e.BytesRecorded, bytesPerSample);
         }
 
-        /// <summary>
-        /// Shared sample path for whole-system and per-process capture. Serializes FFT
-        /// state (multiple process captures deliver from different threads).
-        /// </summary>
         private void HandleAudioData(byte[] buffer, int bytesRecorded, int bytesPerSample)
         {
             lock (_dataLock)
@@ -401,15 +333,12 @@ namespace FluentFlyoutWPF.Classes
                     _fftBuffer[_fftPos].Y = 0;
                     _fftPos++;
 
-                    // When buffer isn't full, skip processing and continue filling
                     if (_fftPos < _fftLength)
                         continue;
 
-                    // perform FFT
                     _fftPos = 0;
-                    ProcessFftData();
+                    FastFourierTransform.FFT(true, (int)Math.Log(_fftLength, 2.0), _fftBuffer);
 
-                    // Update UI with frame rate limiting
                     DateTime now = DateTime.UtcNow;
                     double minFrameTime = 1000.0 / _targetFps;
                     double timeSinceLastUpdate = (now - _lastUpdateTime).TotalMilliseconds;
@@ -418,55 +347,70 @@ namespace FluentFlyoutWPF.Classes
                         continue;
 
                     _lastUpdateTime = now;
-                    SettingsManager.Current.TaskbarVisualizerHasContent = true;
 
-                    if (SettingsManager.Current.TaskbarVisualizerBaseline && !SettingsManager.Current.TaskbarVisualizerBaselineAutoHide)
-                    {
-                        // if baseline is enabled and autohide is off, we want to keep showing the bars even when they are all zero
-                        UpdateBitmap();
-                        break;
-                    }
+                    var controls = TaskbarVisualizerControl.GetActiveInstances();
+                    bool energyComputed = false;
 
-                    // check if bars are all zero, if so set has content to false to disable hover effect
-                    bool allZero = true;
-                    for (int j = 0; j < BarCount; j++)
+                    foreach (var ctrl in controls)
                     {
-                        if (_barValues[j] > 0.01f)
+                        if (!ctrl.Settings.TaskbarVisualizerEnabled)
+                            continue;
+
+                        bool hasAudio = ProcessFftForControl(ctrl, !energyComputed);
+                        energyComputed = true;
+
+                        if (ctrl.Settings.TaskbarVisualizerBaseline && !ctrl.Settings.TaskbarVisualizerBaselineAutoHide)
                         {
-                            allZero = false;
-                            break;
+                            ctrl.Settings.TaskbarVisualizerHasContent = true;
+                            RenderControlBitmap(ctrl);
+                        }
+                        else if (hasAudio)
+                        {
+                            ctrl.Settings.TaskbarVisualizerHasContent = true;
+                            RenderControlBitmap(ctrl);
+                        }
+                        else
+                        {
+                            ctrl.Settings.TaskbarVisualizerHasContent = false;
                         }
                     }
-
-                    // update bars if they have content
-                    if (!allZero)
-                        UpdateBitmap();
-                    else
-                        SettingsManager.Current.TaskbarVisualizerHasContent = false;
                 }
             }
         }
 
-        private void ProcessFftData()
+        private bool ProcessFftForControl(TaskbarVisualizerControl ctrl, bool updateGlobalEnergy)
         {
-            FastFourierTransform.FFT(true, (int)Math.Log(_fftLength, 2.0), _fftBuffer);
+            int barCount = Math.Clamp(ctrl.Settings.TaskbarVisualizerBarCount, 1, 64);
+            ctrl.EnsureBarArrays(barCount);
+            float[] barValues = ctrl.BarValues;
 
-            int sampleRate = _capture.WaveFormat.SampleRate;
+            if (!string.IsNullOrEmpty(TargetApp) && !TargetAudible)
+            {
+                bool any = false;
+                for (int i = 0; i < barCount; i++)
+                {
+                    barValues[i] *= 0.8f;
+                    if (barValues[i] > 0.01f)
+                        any = true;
+                }
+                if (updateGlobalEnergy)
+                    CurrentEnergy *= 0.7f;
+                return any;
+            }
+
+            int sampleRate = _capture?.WaveFormat.SampleRate ?? 48000;
             double frequencyPerBin = (double)sampleRate / _fftLength;
 
             double minFreq = 40;   // Hz
             double maxFreq = 8000; // Hz
-            //double minFreq = 40;  // Hz // could be a setting to be bass only
-            //double maxFreq = 120; // Hz
             float minDb = (SettingsManager.Current.TaskbarVisualizerAudioSensitivity * -10f) - 30f;
             float maxDb = (SettingsManager.Current.TaskbarVisualizerAudioPeakLevel * 10f) - 30f;
 
-            float[] currentBars = new float[BarCount];
-
-            for (int i = 0; i < BarCount; i++)
+            bool allZero = true;
+            for (int i = 0; i < barCount; i++)
             {
-                double startFreq = minFreq * Math.Pow(maxFreq / minFreq, (double)i / BarCount);
-                double endFreq = minFreq * Math.Pow(maxFreq / minFreq, (double)(i + 1) / BarCount);
+                double startFreq = minFreq * Math.Pow(maxFreq / minFreq, (double)i / barCount);
+                double endFreq = minFreq * Math.Pow(maxFreq / minFreq, (double)(i + 1) / barCount);
 
                 int startBin = (int)(startFreq / frequencyPerBin);
                 int endBin = (int)(endFreq / frequencyPerBin);
@@ -475,8 +419,6 @@ namespace FluentFlyoutWPF.Classes
                 if (endBin >= _fftBuffer.Length / 2) endBin = _fftBuffer.Length / 2 - 1;
 
                 float maxAmplitude = 0;
-
-                // Find max amplitude
                 for (int j = startBin; j < endBin; j++)
                 {
                     float amplitude = (float)Math.Sqrt(_fftBuffer[j].X * _fftBuffer[j].X + _fftBuffer[j].Y * _fftBuffer[j].Y);
@@ -484,122 +426,118 @@ namespace FluentFlyoutWPF.Classes
                         maxAmplitude = amplitude;
                 }
 
-                float progress = (float)i / BarCount;
+                float progress = (float)i / barCount;
                 float linearBoost = 1.0f + (progress * 75.0f);
                 maxAmplitude *= linearBoost;
 
                 if (maxAmplitude < 0.001f) maxAmplitude = 0.001f;
 
                 float db = 20f * (float)Math.Log10(maxAmplitude);
+                float intensity = Math.Clamp((db - minDb) / (maxDb - minDb), 0f, 1f);
 
-                float intensity = (db - minDb) / (maxDb - minDb);
-                intensity = Math.Clamp(intensity, 0f, 1f);
-
-                currentBars[i] = intensity;
-            }
-
-            for (int i = 0; i < BarCount; i++)
-            {
-                if (currentBars[i] > _barValues[i])
-                {
-                    // Jump up quickly
-                    _barValues[i] = currentBars[i];
-                }
+                if (intensity > barValues[i])
+                    barValues[i] = intensity;
                 else
-                {
-                    // Fall down slowly
-                    //_barValues[i] = (_barValues[i] * 0.9f) + (currentBars[i] * 0.1f);
-                    _barValues[i] = (_barValues[i] * 0.8f) + (currentBars[i] * 0.2f);
-                    //_barValues[i] = (_barValues[i] * 0.7f) + (currentBars[i] * 0.3f); // could be options for smoothening
-                    //_barValues[i] = (_barValues[i] * 0.6f) + (currentBars[i] * 0.4f);
-                }
+                    barValues[i] = (barValues[i] * 0.8f) + (intensity * 0.2f);
+
+                if (barValues[i] > 0.01f)
+                    allZero = false;
             }
 
-            // beat energy for glow effects: weighted low-end average, slightly smoothed
-            int energyBars = Math.Min(8, BarCount);
-            float energy = 0;
-            for (int i = 0; i < energyBars; i++)
-                energy += _barValues[i];
-            energy /= energyBars;
-            CurrentEnergy = CurrentEnergy * 0.7f + energy * 0.3f;
+            if (updateGlobalEnergy)
+            {
+                int energyBars = Math.Min(8, barCount);
+                float energy = 0;
+                for (int i = 0; i < energyBars; i++)
+                    energy += barValues[i];
+                energy /= Math.Max(1, energyBars);
+                CurrentEnergy = CurrentEnergy * 0.7f + energy * 0.3f;
+            }
+
+            return !allZero;
         }
 
-        private void UpdateBitmap()
+        private void RenderControlBitmap(TaskbarVisualizerControl ctrl)
         {
-            if (_bitmap == null)
+            var bitmap = ctrl.Bitmap;
+            if (bitmap == null)
                 return;
 
-            Application.Current.Dispatcher.InvokeAsync(() =>
+            int imageWidth = ctrl.ImageWidth;
+            int barCount = Math.Clamp(ctrl.Settings.TaskbarVisualizerBarCount, 1, 64);
+            int style = ctrl.Settings.TaskbarVisualizerStyle;
+            bool centeredBars = ctrl.Settings.TaskbarVisualizerCenteredBars;
+            bool baselineEnabled = ctrl.Settings.TaskbarVisualizerBaseline;
+
+            ctrl.EnsureBarArrays(barCount);
+            float[] barValuesSnapshot = (float[])ctrl.BarValues.Clone();
+            float[] peakValues = ctrl.PeakValues;
+
+            Application.Current?.Dispatcher?.InvokeAsync(() =>
             {
-                lock (_lock)
+                lock (ctrl.BitmapLock)
                 {
-                    if (_bitmap == null)
+                    var bmp = ctrl.Bitmap;
+                    if (bmp == null || bmp.PixelWidth != imageWidth)
                         return;
 
-                    _bitmap.Lock();
-
+                    bmp.Lock();
                     try
                     {
                         unsafe
                         {
-                            IntPtr pBackBuffer = _bitmap.BackBuffer;
-                            int stride = _bitmap.BackBufferStride;
+                            IntPtr pBackBuffer = bmp.BackBuffer;
+                            int stride = bmp.BackBufferStride;
                             int bufferSize = stride * ImageHeight;
-
                             Span<byte> buffer = new Span<byte>(pBackBuffer.ToPointer(), bufferSize);
-
                             buffer.Clear();
 
-                            DrawBars(stride, buffer);
+                            if (style == 2)
+                                DrawWave(stride, buffer, imageWidth, barCount, barValuesSnapshot, centeredBars, baselineEnabled);
+                            else
+                                DrawColumnBars(stride, buffer, imageWidth, barCount, barValuesSnapshot, peakValues, centeredBars, baselineEnabled, drawPeaks: style == 1);
                         }
 
-                        _bitmap.AddDirtyRect(new Int32Rect(0, 0, ImageWidth, ImageHeight));
+                        bmp.AddDirtyRect(new Int32Rect(0, 0, imageWidth, ImageHeight));
                     }
                     finally
                     {
-                        _bitmap.Unlock();
+                        bmp.Unlock();
                     }
                 }
             }, System.Windows.Threading.DispatcherPriority.Render);
         }
 
-        private static float[]? _peakValues; // falling peak caps for the Peaks style
-
-        private unsafe void DrawBars(int stride, Span<byte> buffer)
-        {
-            int style = SettingsManager.Current.TaskbarVisualizerStyle;
-            if (style == 2)
-            {
-                DrawWave(stride, buffer);
-                return;
-            }
-            DrawColumnBars(stride, buffer, drawPeaks: style == 1);
-        }
-
-        /// <summary>Smooth interpolated wave: per-column fill from baseline to the bar curve.</summary>
-        private unsafe void DrawWave(int stride, Span<byte> buffer)
+        private unsafe void DrawWave(
+            int stride,
+            Span<byte> buffer,
+            int imageWidth,
+            int barCount,
+            float[] barValues,
+            bool centered,
+            bool baselineEnabled)
         {
             SolidColorBrush brush = BitmapHelper.SavedDominantColors.Count > 0
                 ? BitmapHelper.SavedDominantColors.Last()
                 : (SolidColorBrush)Application.Current.TryFindResource("MicaWPF.Brushes.SystemAccentColorTertiary");
             byte b = brush.Color.B, g = brush.Color.G, r = brush.Color.R;
 
-            bool centered = SettingsManager.Current.TaskbarVisualizerCenteredBars;
-            int baseline = SettingsManager.Current.TaskbarVisualizerBaseline ? Supersample * 2 : 0;
+            int baseline = baselineEnabled ? Supersample * 2 : 0;
             int centerY = ImageHeight / 2;
 
-            float thickness = 3f * Supersample; // curve line thickness in px
+            float thickness = 3f * Supersample;
             float half = thickness / 2f;
+            int effectiveCount = Math.Max(2, barCount);
 
-            for (int x = 0; x < ImageWidth; x++)
+            for (int x = 0; x < imageWidth; x++)
             {
-                // bar-space position across the drawable width
-                float t = (float)x / (ImageWidth - 1) * (BarCount - 1);
+                float t = (float)x / Math.Max(1, imageWidth - 1) * (effectiveCount - 1);
                 int i = (int)t;
-                if (i >= BarCount - 1) i = BarCount - 2;
+                if (i >= effectiveCount - 1) i = effectiveCount - 2;
                 float frac = t - i;
-                float value = (_barValues[i] * (1 - frac) + _barValues[i + 1] * frac);
-                value = Math.Clamp(value, 0f, 1f);
+                float v0 = i < barValues.Length ? barValues[i] : 0f;
+                float v1 = (i + 1) < barValues.Length ? barValues[i + 1] : v0;
+                float value = Math.Clamp(v0 * (1 - frac) + v1 * frac, 0f, 1f);
                 int height = (int)(value * (ImageHeight - baseline * 2));
 
                 int y0, y1;
@@ -616,7 +554,6 @@ namespace FluentFlyoutWPF.Classes
 
                 for (int y = Math.Max(0, y0); y < Math.Min(ImageHeight, y1); y++)
                 {
-                    // AA on the horizontal edges of the line
                     float edge = Math.Min(y - Math.Max(0, y0), Math.Min(ImageHeight - 1, y1 - 1) - y);
                     byte a = edge < 1 ? (byte)(255 * Math.Clamp(edge, 0f, 1f)) : (byte)255;
                     int index = y * stride + (x << 2);
@@ -626,10 +563,17 @@ namespace FluentFlyoutWPF.Classes
             }
         }
 
-        /// <summary>Classic bars, optionally with falling peak caps.</summary>
-        private unsafe void DrawColumnBars(int stride, Span<byte> buffer, bool drawPeaks)
+        private unsafe void DrawColumnBars(
+            int stride,
+            Span<byte> buffer,
+            int imageWidth,
+            int barCount,
+            float[] barValues,
+            float[] peakValues,
+            bool centeredBars,
+            bool baselineEnabled,
+            bool drawPeaks)
         {
-            // Resolve brush once 
             SolidColorBrush brush = BitmapHelper.SavedDominantColors.Count > 0
                 ? BitmapHelper.SavedDominantColors.Last()
                 : (SolidColorBrush)Application.Current.TryFindResource("MicaWPF.Brushes.SystemAccentColorTertiary");
@@ -638,40 +582,31 @@ namespace FluentFlyoutWPF.Classes
             byte g = brush.Color.G;
             byte r = brush.Color.R;
 
-            bool centeredBars = SettingsManager.Current.TaskbarVisualizerCenteredBars;
-            int barBaseline = SettingsManager.Current.TaskbarVisualizerBaseline ? Supersample * 2 : 0;
-
+            int barBaseline = baselineEnabled ? Supersample * 2 : 0;
             int centerY = ImageHeight / 2;
 
-            // Horizontal layout 
-            ComputeLayout(ImageWidth, BarCount, BarSpacing,
-                out int barWidth,
-                out int offsetX);
+            ComputeLayout(imageWidth, barCount, BarSpacing, out int barWidth, out int offsetX);
 
-            // Radius 
-            float baseRadius = GetCornerRadius();
-
-            // AA constants 
+            float baseRadius = (2f * Supersample) / MathF.Max(1f, barCount / 10f);
             const float aa = 1.25f;
             float invAA = 1f / aa;
 
-            for (int i = 0; i < BarCount; i++)
+            for (int i = 0; i < barCount && i < barValues.Length; i++)
             {
                 int barX = offsetX + i * (barWidth + BarSpacing);
-
-                int barHeight = GetBarHeight(_barValues[i], barBaseline);
+                int barHeight = GetBarHeight(barValues[i], barBaseline);
 
                 if (barHeight <= 0)
                     continue;
 
                 ComputeVertical(centeredBars, centerY, barHeight, out int barY, out int barEndY);
 
-                // Clamp radius per bar
                 float radius = ClampRadius(baseRadius, barWidth, barHeight);
                 float radiusSq = radius * radius;
 
                 RasterizeBar(
                     buffer, stride,
+                    imageWidth,
                     barX, barWidth,
                     barY, barEndY,
                     centeredBars,
@@ -682,27 +617,20 @@ namespace FluentFlyoutWPF.Classes
             if (!drawPeaks)
                 return;
 
-            // falling peak caps
-            if (_peakValues == null || _peakValues.Length != BarCount)
-                _peakValues = new float[BarCount];
-
-            for (int i = 0; i < BarCount; i++)
+            for (int i = 0; i < barCount && i < barValues.Length && i < peakValues.Length; i++)
             {
-                float peak = Math.Max(_peakValues[i] * 0.985f, _barValues[i]);
-                _peakValues[i] = peak;
+                float peak = Math.Max(peakValues[i] * 0.985f, barValues[i]);
+                peakValues[i] = peak;
                 if (peak < 0.01f) continue;
 
                 int barX = offsetX + i * (barWidth + BarSpacing);
-
                 int capHeight = (int)(Math.Clamp(peak, 0f, 1f) * (ImageHeight - barBaseline * 2));
-                int capY;
-                if (centeredBars)
-                    capY = centerY - capHeight / 2;
-                else
-                    capY = ImageHeight - barBaseline - capHeight;
+                int capY = centeredBars
+                    ? centerY - capHeight / 2
+                    : ImageHeight - barBaseline - capHeight;
                 capY = Math.Clamp(capY, 0, ImageHeight - 2);
 
-                for (int x = barX; x < barX + barWidth && x < ImageWidth && x >= 0; x++)
+                for (int x = barX; x < barX + barWidth && x < imageWidth && x >= 0; x++)
                 {
                     for (int y = capY; y < capY + 2 * Supersample && y < ImageHeight; y++)
                     {
@@ -721,23 +649,15 @@ namespace FluentFlyoutWPF.Classes
             out int barWidth,
             out int offsetX)
         {
-            // when the bars can't fit at full spacing, compress the gaps first
-            // so high bar counts stay usable on short visualizer lengths
             if (barCount + (barCount - 1) * spacing + 1 > imageWidth)
             {
                 spacing = Math.Max(1, (imageWidth - 1 - barCount) / Math.Max(1, barCount - 1));
             }
 
             int totalSpacing = (barCount - 1) * spacing;
-
             int availableWidth = imageWidth - totalSpacing - 1;
-
-            // still not fitting? clamp to 1px so bars stay visible (they overflow-clip in the control)
-            barWidth = Math.Max(1, availableWidth / barCount);
-
+            barWidth = Math.Max(1, availableWidth / Math.Max(1, barCount));
             int usedWidth = barWidth * barCount + totalSpacing;
-
-            // Center safely
             offsetX = (imageWidth - usedWidth) >> 1;
         }
 
@@ -745,7 +665,7 @@ namespace FluentFlyoutWPF.Classes
         {
             if (centered)
             {
-                int half = height >> 1; // faster than /2
+                int half = height >> 1;
                 y = centerY - half;
                 endY = centerY + half;
             }
@@ -760,10 +680,6 @@ namespace FluentFlyoutWPF.Classes
         {
             return Math.Max((int)(Math.Clamp(value, 0f, 1f) * ImageHeight), baseline);
         }
-        private static float GetCornerRadius()
-        {
-            return (2f * Supersample) / MathF.Max(1f, SettingsManager.Current.TaskbarVisualizerBarCount / 10f);
-        }
 
         private static float ClampRadius(float r, int width, int height)
         {
@@ -774,6 +690,7 @@ namespace FluentFlyoutWPF.Classes
         private unsafe void RasterizeBar(
             Span<byte> buffer,
             int stride,
+            int imageWidth,
             int barX,
             int barWidth,
             int barY,
@@ -799,36 +716,32 @@ namespace FluentFlyoutWPF.Classes
                 int row = y * stride;
                 float py = y + 0.5f;
 
-                for (int x = barX; x < barX + barWidth && x < ImageWidth && x >= 0; x++)
+                for (int x = barX; x < barX + barWidth && x < imageWidth && x >= 0; x++)
                 {
-                    int index = row + (x << 2); // x * 4 (bitshift faster)
+                    int index = row + (x << 2);
                     if (index + 3 >= buffer.Length)
                         continue;
 
                     float px = x + 0.5f;
 
-                    // CENTER
                     if (px >= innerLeft && px <= innerRight)
                     {
                         WritePixel(buffer, index, b, g, r, 255);
                         continue;
                     }
 
-                    // SIDES
                     if (py >= innerTop && py <= innerBottom)
                     {
                         WritePixel(buffer, index, b, g, r, 255);
                         continue;
                     }
 
-                    // FLAT BOTTOM
                     if (!centeredBars && py >= innerBottom)
                     {
                         WritePixel(buffer, index, b, g, r, 255);
                         continue;
                     }
 
-                    // CORNERS
                     float cx = px < innerLeft ? innerLeft : (px > innerRight ? innerRight : px);
                     float cy = py < innerTop ? innerTop : (py > innerBottom ? innerBottom : py);
 

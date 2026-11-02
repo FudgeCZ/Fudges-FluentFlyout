@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2024-2026 The FluentFlyout Authors
+// Copyright (c) 2024-2026 The FluentFlyout Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 using FluentFlyout.Classes;
@@ -112,9 +112,8 @@ public static class MonitorUtil
     public static void UpdateMonitorList(ComboBox comboBox, Func<int> getSelectedIndex, Action<int> setSelectedIndex)
     {
         var monitors = GetMonitors();
-        comboBox.Items.Clear();
-
         int savedIndex = getSelectedIndex();
+        comboBox.Items.Clear();
 
         bool resetToPrimary =
             savedIndex >= monitors.Count ||

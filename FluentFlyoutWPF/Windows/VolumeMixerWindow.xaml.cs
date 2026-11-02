@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2024-2026 The FluentFlyout Authors
+// Copyright (c) 2024-2026 The FluentFlyout Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // Portions of this code are derived from:
@@ -182,7 +182,10 @@ public partial class VolumeMixerWindow : MicaWindow
 
     private void OnSessionVolumeChanged(object? sender, EventArgs e)
     {
-        _mainWindow.taskbarWindow?.RefreshAppVolumeTooltip();
+        foreach (var tw in _mainWindow.taskbarWindows)
+        {
+            tw.RefreshAppVolumeTooltip();
+        }
     }
 
     protected override void OnClosed(EventArgs e)

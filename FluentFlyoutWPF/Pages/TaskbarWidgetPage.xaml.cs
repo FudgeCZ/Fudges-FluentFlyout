@@ -15,6 +15,7 @@ public partial class TaskbarWidgetPage : Page
     {
         InitializeComponent();
         DataContext = SettingsManager.Current;
+        Loaded += (_, _) => UpdateMonitorList();
         UpdateMonitorList();
     }
 
@@ -24,5 +25,10 @@ public partial class TaskbarWidgetPage : Page
             TaskbarWidgetSelectedMonitorComboBox,
             () => SettingsManager.Current.TaskbarWidgetSelectedMonitor,
             value => SettingsManager.Current.TaskbarWidgetSelectedMonitor = value);
+    }
+
+    private void CopyToAllMonitors_Click(object sender, RoutedEventArgs e)
+    {
+        SettingsManager.Current.CopyCurrentMonitorSettingsToAll(MonitorUtil.GetMonitors().Count);
     }
 }

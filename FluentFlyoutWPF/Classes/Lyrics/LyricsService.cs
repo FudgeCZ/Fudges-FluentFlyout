@@ -43,6 +43,7 @@ public sealed class LyricsService
     private readonly Dictionary<string, LyricsResult?> _memoryCache = new();
 
     private string _requestKey = "";
+    private string _inFlightKey = "";
 
     /// <summary>Track identity of <see cref="Current"/> ("artist|title|seconds"), or "" when idle.</summary>
     public string CurrentKey { get; private set; } = "";
@@ -68,6 +69,9 @@ public sealed class LyricsService
 
     /// <summary>Raised on the UI thread when per-track disabled state changes.</summary>
     public event Action? TrackDisabledStateChanged;
+
+    /// <summary>Raised on the UI thread when per-track sync offset changes.</summary>
+    public event Action? TrackOffsetChanged;
 
     public LyricsService()
     {
@@ -161,6 +165,7 @@ public sealed class LyricsService
         if (key.Length == 0)
             return;
 
+        _inFlightKey = "";
         var parts = key.Split('|');
         if (parts.Length != 3)
             return;
@@ -169,11 +174,6 @@ public sealed class LyricsService
     }
 
     /// <summary>
-    /// Fetches one provider with its own disk cache. <paramref name="mainCacheKey"/> is
-    /// the request identity (staleness check); <paramref name="providerCacheKey"/> is the
-    /// per-provider cache entry.
-    /// </summary>
-    /// <summary>
     /// Fetches lyrics with per-track winner memory: the provider that previously
     /// won for this track is tried first, then the main provider, then the rest.
     /// Always terminates with exactly one LyricsChanged notification.
@@ -181,47 +181,60 @@ public sealed class LyricsService
     public async Task<LyricsResult?> FetchWithMemoryAsync(string artist, string title, TimeSpan duration, int mainProvider)
     {
         string key = MakeKey(artist, title, duration);
+        string inFlightId = $"{key}|p{mainProvider}";
+        if (_inFlightKey == inFlightId)
+            return null; // another monitor already started this exact fetch
+
+        _inFlightKey = inFlightId;
         _requestKey = key;
         CurrentKey = key;
         Current = null;
 
-        if (IsTrackDisabled(artist, title))
+        try
         {
-            NotifyChanged();
+            if (IsTrackDisabled(artist, title))
+            {
+                NotifyChanged();
+                return null;
+            }
+
+            int? winner = GetWinner(artist, title, duration);
+            var order = new List<int> { mainProvider };
+            order.AddRange(LyricsProviders.All().Where(p => p != mainProvider));
+            if (winner.HasValue && winner.Value != mainProvider)
+            {
+                order.Remove(winner.Value);
+                order.Insert(0, winner.Value);
+            }
+
+            foreach (int provider in order)
+            {
+                var result = await TryProviderCachedAsync(key, artist, title, duration, provider);
+                if (_requestKey != key)
+                    return null; // superseded by a newer track
+
+                if (result != null)
+                {
+                    if (winner != provider)
+                        SetWinner(artist, title, duration, provider);
+                    Current = result;
+                    NotifyChanged();
+                    return result;
+                }
+            }
+
+            if (_requestKey == key)
+            {
+                Current = null;
+                NotifyChanged(); // terminal miss — the widget must hide
+            }
             return null;
         }
-
-        int? winner = GetWinner(artist, title, duration);
-        var order = new List<int> { mainProvider };
-        order.AddRange(LyricsProviders.All().Where(p => p != mainProvider));
-        if (winner.HasValue && winner.Value != mainProvider)
+        finally
         {
-            order.Remove(winner.Value);
-            order.Insert(0, winner.Value);
+            if (_inFlightKey == inFlightId)
+                _inFlightKey = "";
         }
-
-        foreach (int provider in order)
-        {
-            var result = await TryProviderCachedAsync(key, artist, title, duration, provider);
-            if (_requestKey != key)
-                return null; // superseded by a newer track
-
-            if (result != null)
-            {
-                if (winner != provider)
-                    SetWinner(artist, title, duration, provider);
-                Current = result;
-                NotifyChanged();
-                return result;
-            }
-        }
-
-        if (_requestKey == key)
-        {
-            Current = null;
-            NotifyChanged(); // terminal miss — the widget must hide
-        }
-        return null;
     }
 
     /// <summary>Per-provider lookup: memory cache, then disk cache, then network.</summary>
@@ -1041,6 +1054,7 @@ public sealed class LyricsService
                 Logger.Debug(ex, "Failed to save lyrics offsets");
             }
         }
+        System.Windows.Application.Current?.Dispatcher?.BeginInvoke(() => TrackOffsetChanged?.Invoke());
     }
 
     private void EnsureOffsetsLoaded()

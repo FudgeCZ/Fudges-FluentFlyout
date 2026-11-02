@@ -3,6 +3,7 @@
 
 using FluentFlyout.Classes.Settings;
 using FluentFlyoutWPF.Classes.Lyrics;
+using FluentFlyoutWPF.Classes.Utils;
 using System;
 using System.IO;
 using System.Windows;
@@ -18,11 +19,26 @@ public partial class LyricsPage : Page
         DataContext = SettingsManager.Current;
         Loaded += (_, _) =>
         {
+            UpdateMonitorList();
             SessionStatusText.Text = SettingsManager.Current.LyricsYtmSession.Length > 0 ? "Session imported." : "";
             UpdateDisabledSongsUi();
         };
+        UpdateMonitorList();
         LyricsService.Instance.TrackDisabledStateChanged += UpdateDisabledSongsUi;
         Unloaded += (_, _) => LyricsService.Instance.TrackDisabledStateChanged -= UpdateDisabledSongsUi;
+    }
+
+    private void UpdateMonitorList()
+    {
+        MonitorUtil.UpdateMonitorList(
+            LyricsSelectedMonitorComboBox,
+            () => SettingsManager.Current.TaskbarWidgetSelectedMonitor,
+            value => SettingsManager.Current.TaskbarWidgetSelectedMonitor = value);
+    }
+
+    private void CopyToAllMonitors_Click(object sender, RoutedEventArgs e)
+    {
+        SettingsManager.Current.CopyCurrentMonitorSettingsToAll(MonitorUtil.GetMonitors().Count);
     }
 
     private void UpdateDisabledSongsUi()

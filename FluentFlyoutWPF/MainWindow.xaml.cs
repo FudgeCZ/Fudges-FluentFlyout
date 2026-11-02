@@ -73,7 +73,8 @@ public partial class MainWindow : MicaWindow
     private LockWindow? lockWindow;
     private DateTime _lastSelfUpdateTimestamp = DateTime.MinValue;
 
-    internal TaskbarWindow? taskbarWindow;
+    internal readonly List<TaskbarWindow> taskbarWindows = [];
+    internal TaskbarWindow? taskbarWindow => taskbarWindows.FirstOrDefault();
 
     private VolumeMixerWindow? volumeMixerWindow;
 
@@ -176,9 +177,8 @@ public partial class MainWindow : MicaWindow
         _widgetTimeTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _widgetTimeTimer.Tick += (_, _) =>
         {
-            if (taskbarWindow == null) return;
-            if (SettingsManager.Current.TaskbarWidgetTimeEnabled)
-                UpdateTaskbarWidgetExtras();
+            if (taskbarWindows.Count == 0) return;
+            UpdateTaskbarWidgetExtras();
             UpdateLyricsWidget();
             if (IsYtmActiveWithBridge())
                 _ = RefreshYtmStateAsync();
@@ -374,11 +374,12 @@ public partial class MainWindow : MicaWindow
             : null;
     }
 
-    public void AdjustTaskbarVolume(float delta)
+    public void AdjustTaskbarVolume(float delta, int? modeOverride = null)
     {
         if (volumeMixerWindow?.ViewModel is not { } volumeMixerViewModel) return;
 
-        switch (SettingsManager.Current.TaskbarWidgetScrollVolumeMode)
+        int mode = modeOverride ?? SettingsManager.Current.TaskbarWidgetScrollVolumeMode;
+        switch (mode)
         {
             // 0 = disabled, 1 = master volume, 2 = active media session
             case 1:
@@ -518,18 +519,21 @@ public partial class MainWindow : MicaWindow
     }
 
     /// <summary>
-    /// Pushes shuffle/repeat states and the time readout to the taskbar widget.
+    /// Pushes shuffle/repeat states and the time readout to all taskbar widgets.
     /// </summary>
     public void UpdateTaskbarWidgetExtras()
     {
-        if (taskbarWindow == null) return;
+        if (taskbarWindows.Count == 0) return;
         try
         {
             if (GetActiveMediaSession() is not { } session)
             {
-                taskbarWindow.Widget.UpdateShuffleRepeat(null, null);
-                taskbarWindow.Widget.UpdateTimeText("");
-                taskbarWindow.Widget.SetTimeline(TimeSpan.Zero, DateTime.MinValue, false, TimeSpan.Zero);
+                foreach (var tw in taskbarWindows)
+                {
+                    tw.Widget.UpdateShuffleRepeat(null, null);
+                    tw.Widget.UpdateTimeText("");
+                    tw.Widget.SetTimeline(TimeSpan.Zero, DateTime.MinValue, false, TimeSpan.Zero);
+                }
                 return;
             }
 
@@ -537,9 +541,12 @@ public partial class MainWindow : MicaWindow
 
             if (info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed)
             {
-                taskbarWindow.Widget.UpdateShuffleRepeat(null, null);
-                taskbarWindow.Widget.UpdateTimeText("");
-                taskbarWindow.Widget.SetTimeline(TimeSpan.Zero, DateTime.MinValue, false, TimeSpan.Zero);
+                foreach (var tw in taskbarWindows)
+                {
+                    tw.Widget.UpdateShuffleRepeat(null, null);
+                    tw.Widget.UpdateTimeText("");
+                    tw.Widget.SetTimeline(TimeSpan.Zero, DateTime.MinValue, false, TimeSpan.Zero);
+                }
                 return;
             }
 
@@ -551,23 +558,26 @@ public partial class MainWindow : MicaWindow
                 global::Windows.Media.MediaPlaybackAutoRepeatMode.None => 0,
                 _ => null,
             };
-            taskbarWindow.Widget.UpdateShuffleRepeat(
-                ytm ? _ytmShuffleState : info.IsShuffleActive,
-                ytm ? _ytmRepeatState : repeatMode,
-                ytm ? true : null,
-                ytm ? true : null);
 
             // real data from the player's own timeline updates; extrapolate between
             // pushes only while actually playing
             var timeline = session.ControlSession.GetTimelineProperties();
-            var pos = info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing
+            bool isPlaying = info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
+            var pos = isPlaying
                 ? timeline.Position + (DateTime.Now - timeline.LastUpdatedTime.DateTime)
                 : timeline.Position;
             string time = $"{FormatTime(pos)} / {FormatTime(timeline.EndTime)}";
-            taskbarWindow.Widget.UpdateTimeText(time);
-            taskbarWindow.Widget.SetTimeline(pos, timeline.LastUpdatedTime.DateTime,
-                info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing,
-                timeline.EndTime);
+
+            foreach (var tw in taskbarWindows)
+            {
+                tw.Widget.UpdateShuffleRepeat(
+                    ytm ? _ytmShuffleState : info.IsShuffleActive,
+                    ytm ? _ytmRepeatState : repeatMode,
+                    ytm ? true : null,
+                    ytm ? true : null);
+                tw.Widget.UpdateTimeText(time);
+                tw.Widget.SetTimeline(pos, timeline.LastUpdatedTime.DateTime, isPlaying, timeline.EndTime);
+            }
         }
         catch (Exception ex)
         {
@@ -581,7 +591,7 @@ public partial class MainWindow : MicaWindow
     /// <summary>Requests lyrics for the current track (taskbar lyrics widget).</summary>
     public void NotifyLyricsTrackChanged(string title, string artist)
     {
-        if (!SettingsManager.Current.LyricsEnabled) return;
+        if (!SettingsManager.Current.IsAnyMonitorLyricsEnabled) return;
 
         string key = $"{artist}|{title}";
         TimeSpan duration = TimeSpan.Zero;
@@ -595,11 +605,14 @@ public partial class MainWindow : MicaWindow
             Logger.Debug(ex, "Failed to read timeline for lyrics");
         }
 
-        taskbarWindow?.Dispatcher.BeginInvoke(() =>
+        Dispatcher.BeginInvoke(() =>
         {
             if (key == _lyricsTrackKey) return;
             _lyricsTrackKey = key;
-            taskbarWindow.Lyrics.SetTrack(artist, title, duration);
+            foreach (var tw in taskbarWindows)
+            {
+                tw.Lyrics.SetTrack(artist, title, duration);
+            }
         });
     }
 
@@ -612,8 +625,7 @@ public partial class MainWindow : MicaWindow
     /// </summary>
     private async void UpdateLyricsWidget()
     {
-        var lyrics = taskbarWindow?.Lyrics;
-        if (lyrics == null) return;
+        if (taskbarWindows.Count == 0) return;
 
         try
         {
@@ -657,7 +669,10 @@ public partial class MainWindow : MicaWindow
                     playing = !bridge.IsPaused;
             }
 
-            lyrics.SetClock(timeline.Position, timeline.LastUpdatedTime.DateTime, playing);
+            foreach (var tw in taskbarWindows)
+            {
+                tw.Lyrics.SetClock(timeline.Position, timeline.LastUpdatedTime.DateTime, playing);
+            }
 
             UpdateVisualizerGate(mediaProps.Title, mediaProps.Artist,
                 info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing);
@@ -731,6 +746,7 @@ public partial class MainWindow : MicaWindow
             if (GetActiveMediaSession() is not { } session) return;
             var info = TryGetMediaProperties(session.ControlSession);
             if (info == null || string.IsNullOrWhiteSpace(info.Title)) return;
+            _lyricsTrackKey = "";
             NotifyLyricsTrackChanged(info.Title, info.Artist);
         }
         catch (Exception ex)
@@ -1039,7 +1055,10 @@ public partial class MainWindow : MicaWindow
         var activeSession = GetActiveMediaSession();
         if (!mediaManager.IsStarted || activeSession == null)
         {
-            taskbarWindow?.UpdateUi("-", "-", null, GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed);
+            foreach (var tw in taskbarWindows)
+            {
+                tw.UpdateUi("-", "-", null, GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed);
+            }
             return;
         }
 
@@ -1050,7 +1069,10 @@ public partial class MainWindow : MicaWindow
         var playbackInfo = activeSession.ControlSession.GetPlaybackInfo();
         var thumbnail = BitmapHelper.GetThumbnail(songInfo.Thumbnail);
         BitmapHelper.GetDominantColors(1);
-        taskbarWindow?.UpdateUi(songInfo.Title, songInfo.Artist, thumbnail, playbackInfo.PlaybackStatus, playbackInfo.Controls);
+        foreach (var tw in taskbarWindows)
+        {
+            tw.UpdateUi(songInfo.Title, songInfo.Artist, thumbnail, playbackInfo.PlaybackStatus, playbackInfo.Controls);
+        }
         UpdateTaskbarWidgetExtras();
     }
 
@@ -1105,7 +1127,10 @@ public partial class MainWindow : MicaWindow
         var focusedSession = GetActiveMediaSession();
         if (focusedSession == null)
         {
-            taskbarWindow?.UpdateUi("-", "-", null, GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed);
+            foreach (var tw in taskbarWindows)
+            {
+                tw.UpdateUi("-", "-", null, GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed);
+            }
             return;
         }
 
@@ -1116,7 +1141,10 @@ public partial class MainWindow : MicaWindow
             BitmapHelper.GetDominantColors(1);
             var tbPlayback = focusedSession.ControlSession.GetPlaybackInfo();
 
-            taskbarWindow?.UpdateUi(tbSongInfo.Title, tbSongInfo.Artist, tbThumbnail, tbPlayback?.PlaybackStatus, tbPlayback?.Controls);
+            foreach (var tw in taskbarWindows)
+            {
+                tw.UpdateUi(tbSongInfo.Title, tbSongInfo.Artist, tbThumbnail, tbPlayback?.PlaybackStatus, tbPlayback?.Controls);
+            }
             UpdateTaskbarWidgetExtras();
         }
 
@@ -1142,7 +1170,10 @@ public partial class MainWindow : MicaWindow
         var currentActiveSession = GetActiveMediaSession();
         if (currentActiveSession == null)
         {
-            taskbarWindow?.UpdateUi("-", "-", null, GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed);
+            foreach (var tw in taskbarWindows)
+            {
+                tw.UpdateUi("-", "-", null, GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed);
+            }
             return;
         }
 
@@ -1168,7 +1199,10 @@ public partial class MainWindow : MicaWindow
         var thumbnail = BitmapHelper.GetThumbnail(songInfo.Thumbnail);
         BitmapHelper.GetDominantColors(1);
 
-        taskbarWindow?.UpdateUi(songInfo.Title, songInfo.Artist, thumbnail, playbackInfo.PlaybackStatus, playbackInfo.Controls);
+        foreach (var tw in taskbarWindows)
+        {
+            tw.UpdateUi(songInfo.Title, songInfo.Artist, thumbnail, playbackInfo.PlaybackStatus, playbackInfo.Controls);
+        }
 
         NotifyLyricsTrackChanged(songInfo.Title, songInfo.Artist);
 
@@ -1260,7 +1294,11 @@ public partial class MainWindow : MicaWindow
         if (GetActiveMediaSession() == null)
         {
             _lyricsTrackKey = "";
-            taskbarWindow?.Dispatcher.BeginInvoke(() => taskbarWindow.Lyrics.Clear());
+            foreach (var tw in taskbarWindows)
+            {
+                var window = tw;
+                window.Dispatcher.BeginInvoke(() => window.Lyrics.Clear());
+            }
         }
 
         UpdateTaskbar();
@@ -1974,8 +2012,12 @@ public partial class MainWindow : MicaWindow
             if (nextUpWindow?.IsLoaded == true)
                 nextUpWindow.Close();
 
-            if (taskbarWindow?.IsLoaded == true)
-                taskbarWindow.Close();
+            foreach (var tw in taskbarWindows.ToList())
+            {
+                if (tw.IsLoaded)
+                    tw.Close();
+            }
+            taskbarWindows.Clear();
 
             if (volumeMixerWindow?.IsLoaded == true)
                 volumeMixerWindow.Close();
@@ -2357,35 +2399,44 @@ public partial class MainWindow : MicaWindow
 
         BitmapHelper.GetDominantColors(1);
         volumeMixerWindow = new VolumeMixerWindow();
-        taskbarWindow = new TaskbarWindow();
+        CreateTaskbarWindows();
         UpdateTaskbar();
+    }
+
+    private void CreateTaskbarWindows()
+    {
+        var monitors = MonitorUtil.GetMonitors();
+        int count = Math.Max(1, monitors.Count);
+        for (int i = 0; i < count; i++)
+        {
+            taskbarWindows.Add(new TaskbarWindow(i));
+        }
     }
 
     public void RecreateTaskbarWindow()
     {
         try
         {
-            Logger.Info("Recreating Taskbar Widget window");
+            Logger.Info("Recreating Taskbar Widget windows");
 
-            if (taskbarWindow != null)
+            foreach (var tw in taskbarWindows.ToList())
             {
                 try
                 {
-                    taskbarWindow.Close();
+                    tw.Close();
                 }
                 catch { }
-
-                taskbarWindow = null;
             }
+            taskbarWindows.Clear();
 
-            taskbarWindow = new();
+            CreateTaskbarWindows();
             UpdateTaskbar();
 
-            Logger.Info("Taskbar Widget window recreated successfully");
+            Logger.Info("Taskbar Widget windows recreated successfully");
         }
         catch (Exception ex)
         {
-            Logger.Error(ex, "Failed to recreate Taskbar Widget window");
+            Logger.Error(ex, "Failed to recreate Taskbar Widget windows");
         }
     }
 

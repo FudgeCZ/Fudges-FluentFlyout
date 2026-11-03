@@ -1,7 +1,6 @@
 // Copyright (c) 2024-2026 The FluentFlyout Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-using FluentFlyoutWPF.Classes.Clients;
 using NLog;
 using System.Net.Http;
 using System.Text.Json;
@@ -36,6 +35,8 @@ public static class UpdateCheckerService
         public bool IsUpdateAvailable { get; set; }
         public string NewestVersion { get; set; } = string.Empty;
         public string UpdateUrl { get; set; } = string.Empty;
+        public string DownloadUrl { get; set; } = string.Empty;
+        public string AssetName { get; set; } = string.Empty;
         public DateTime CheckedAt { get; set; }
         public bool Success { get; set; }
     }
@@ -60,6 +61,25 @@ public static class UpdateCheckerService
             result.NewestVersion = json.RootElement.GetProperty("tag_name").GetString() ?? string.Empty;
             result.UpdateUrl = json.RootElement.GetProperty("html_url").GetString() ?? string.Empty;
             result.Success = true;
+
+            // find the zip asset the custom updater installs (prefer the x64 build)
+            if (json.RootElement.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var asset in assets.EnumerateArray())
+                {
+                    if (asset.TryGetProperty("name", out var nameEl) && nameEl.GetString() is { } name &&
+                        name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool isX64 = name.Contains("x64", StringComparison.OrdinalIgnoreCase);
+                        if (isX64 || string.IsNullOrEmpty(result.DownloadUrl))
+                        {
+                            result.DownloadUrl = asset.TryGetProperty("browser_download_url", out var dl) ? dl.GetString() ?? "" : "";
+                            result.AssetName = name;
+                        }
+                        if (isX64) break;
+                    }
+                }
+            }
 
             // Compare versions
             result.IsUpdateAvailable = currentVersion != "debug" && IsNewerVersion(currentVersion, result.NewestVersion);

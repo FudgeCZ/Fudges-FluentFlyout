@@ -76,6 +76,24 @@
                 </StackPanel>
             </ui:Button>
 
+            <!--Custom updater: downloads and applies the update in-place-->
+            <ui:Button x:Name="UpdateNowButton" Appearance="Primary" Padding="16,8" Margin="0,0,16,16" Click="UpdateNow_Click">
+                <ui:Button.Style>
+                    <Style TargetType="ui:Button" BasedOn="{StaticResource {x:Type ui:Button}}">
+                        <Setter Property="Visibility" Value="Collapsed" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding CanAutoUpdate, Source={x:Static viewModels:UpdateState.Current}}" Value="True">
+                                <Setter Property="Visibility" Value="Visible" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </ui:Button.Style>
+                <StackPanel Orientation="Horizontal">
+                    <ui:SymbolIcon Symbol="ArrowDownload24" FontSize="20" Margin="0,0,8,0" />
+                    <ui:TextBlock Text="Update now" FontWeight="SemiBold" VerticalAlignment="Center" />
+                </StackPanel>
+            </ui:Button>
+
             <!--Supporter status indicator-->
             <ui:Button Appearance="Transparent" Padding="8" BorderBrush="Transparent" Margin="0,0,0,16" IsHitTestVisible="False">
                 <ui:Button.Style>

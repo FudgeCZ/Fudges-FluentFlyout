@@ -58,6 +58,62 @@ public partial class HomePage : Page
         Notifications.OpenChangelogInBrowser();
     }
 
+    private bool _updating;
+
+    /// <summary>
+    /// Custom updater: downloads the release asset, then hands over to a detached
+    /// helper that swaps the files once this app exits and restarts it.
+    /// </summary>
+    private async void UpdateNow_Click(object sender, RoutedEventArgs e)
+    {
+        if (_updating) return;
+        _updating = true;
+        UpdateNowButton.IsEnabled = false;
+
+        try
+        {
+            string version = UpdateState.Current.NewestVersion;
+            string url = UpdateState.Current.DownloadUrl;
+
+            var progress = new Progress<double>(p =>
+            {
+                UpdateStatusText.Text = $"Downloading update… {p:F0}%";
+            });
+            UpdateStatusText.Text = "Downloading update… 0%";
+
+            string? zipPath = await UpdateInstallerService.DownloadUpdateAsync(url, version, progress);
+            if (zipPath == null)
+            {
+                UpdateStatusText.Text = "Download failed — opening the releases page";
+                UpdateCheckerService.OpenUpdateUrl(string.IsNullOrEmpty(UpdateState.Current.UpdateUrl)
+                    ? "https://github.com/FudgeCZ/Fudges-FluentFlyout/releases/latest"
+                    : UpdateState.Current.UpdateUrl);
+                _updating = false;
+                UpdateNowButton.IsEnabled = true;
+                return;
+            }
+
+            UpdateStatusText.Text = "Restarting to apply the update…";
+            if (UpdateInstallerService.LaunchStagedUpdate(zipPath))
+            {
+                Application.Current.Shutdown();
+                return;
+            }
+
+            // helper could not start — fall back to the manual route
+            UpdateCheckerService.OpenUpdateUrl(UpdateState.Current.UpdateUrl);
+            _updating = false;
+            UpdateNowButton.IsEnabled = true;
+        }
+        catch (Exception ex)
+        {
+            Logger.Error(ex, "Custom update flow failed");
+            _updating = false;
+            UpdateNowButton.IsEnabled = true;
+            UpdateStatusText.Text = "Update failed — try again later";
+        }
+    }
+
     private long _lastChecked = 0;
 
     private async void CheckForUpdates_Click(object sender, RoutedEventArgs e)
@@ -72,7 +128,7 @@ public partial class HomePage : Page
 
         if (UpdateState.Current.IsUpdateAvailable)
         {
-            string url = !string.IsNullOrEmpty(UpdateState.Current.UpdateUrl) ? UpdateState.Current.UpdateUrl : "https://fluentflyout.com/changelog/";
+            string url = !string.IsNullOrEmpty(UpdateState.Current.UpdateUrl) ? UpdateState.Current.UpdateUrl : "https://github.com/FudgeCZ/Fudges-FluentFlyout/releases/latest";
             UpdateCheckerService.OpenUpdateUrl(url);
         }
         else
@@ -94,6 +150,8 @@ public partial class HomePage : Page
                 UpdateState.Current.IsUpdateAvailable = result.IsUpdateAvailable;
                 UpdateState.Current.NewestVersion = result.NewestVersion;
                 UpdateState.Current.UpdateUrl = result.UpdateUrl;
+                UpdateState.Current.DownloadUrl = result.DownloadUrl;
+                UpdateState.Current.CanAutoUpdate = result.IsUpdateAvailable && !string.IsNullOrEmpty(result.DownloadUrl);
                 UpdateState.Current.LastUpdateCheck = result.CheckedAt;
 
                 UpdateLastCheckedText();

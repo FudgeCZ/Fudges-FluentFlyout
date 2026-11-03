@@ -31,6 +31,18 @@ public partial class UpdateState : ObservableObject
     public partial string UpdateUrl { get; set; } = string.Empty;
 
     /// <summary>
+    /// Direct download URL of the release asset (empty when the release has no zip)
+    /// </summary>
+    [ObservableProperty]
+    public partial string DownloadUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether the custom in-app updater can install the update (update available + asset found)
+    /// </summary>
+    [ObservableProperty]
+    public partial bool CanAutoUpdate { get; set; }
+
+    /// <summary>
     /// Timestamp of the last update check
     /// </summary>
     [ObservableProperty]

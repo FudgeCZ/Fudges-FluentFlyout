@@ -280,6 +280,7 @@ public partial class MainWindow : MicaWindow
 
     private async Task CheckForUpdatesOnStartupAsync()
     {
+        UpdateInstallerService.CleanupStaleBackups();
         try
         {
             var result = await UpdateCheckerService.CheckForUpdatesAsync(SettingsManager.Current.LastKnownVersion);
@@ -289,6 +290,8 @@ public partial class MainWindow : MicaWindow
                 UpdateState.Current.IsUpdateAvailable = result.IsUpdateAvailable;
                 UpdateState.Current.NewestVersion = result.NewestVersion;
                 UpdateState.Current.UpdateUrl = result.UpdateUrl;
+                UpdateState.Current.DownloadUrl = result.DownloadUrl;
+                UpdateState.Current.CanAutoUpdate = result.IsUpdateAvailable && !string.IsNullOrEmpty(result.DownloadUrl);
                 UpdateState.Current.LastUpdateCheck = result.CheckedAt;
 
                 if (result.IsUpdateAvailable)

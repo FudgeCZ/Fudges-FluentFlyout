@@ -9,12 +9,24 @@ using System.Text.Json;
 namespace FluentFlyoutWPF.Classes.Services;
 
 /// <summary>
-/// Handles checking for application updates from the API
+/// Handles checking for application updates from the GitHub releases of this fork
+/// (replaces upstream's fluentflyout.com API so fork releases drive in-app updates).
 /// </summary>
 public static class UpdateCheckerService
 {
     private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
-    private const string ApiEndpoint = "newest-version";
+    private const string ReleasesApiUrl = "https://api.github.com/repos/FudgeCZ/Fudges-FluentFlyout/releases/latest";
+
+    private static readonly HttpClient _http = CreateClient();
+
+    private static HttpClient CreateClient()
+    {
+        var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        // GitHub API rejects requests without a User-Agent
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("FluentFlyout-Fork-UpdateCheck");
+        client.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+        return client;
+    }
 
     /// <summary>
     /// Result of an update check
@@ -42,11 +54,11 @@ public static class UpdateCheckerService
 
         try
         {
-            var response = await FluentFlyoutApiClient.GetStringAsync(ApiEndpoint);
+            var response = await _http.GetStringAsync(ReleasesApiUrl);
             var json = JsonDocument.Parse(response);
 
-            result.NewestVersion = json.RootElement.GetProperty("version").GetString() ?? string.Empty;
-            result.UpdateUrl = json.RootElement.GetProperty("url").GetString() ?? string.Empty;
+            result.NewestVersion = json.RootElement.GetProperty("tag_name").GetString() ?? string.Empty;
+            result.UpdateUrl = json.RootElement.GetProperty("html_url").GetString() ?? string.Empty;
             result.Success = true;
 
             // Compare versions

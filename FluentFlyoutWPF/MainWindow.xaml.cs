@@ -221,14 +221,26 @@ public partial class MainWindow : MicaWindow
         {
             LocalizationManager.ApplyLocalization();
 
-            try // update last known version. gets the version of the app, works only in release mode
+            try // update last known version. packaged (MSIX/Store) builds read the package identity
             {
                 var version = Package.Current.Id.Version;
                 SettingsManager.Current.LastKnownVersion = $"v{version.Major}.{version.Minor}.{version.Build}";
             }
             catch
             {
-                SettingsManager.Current.LastKnownVersion = "debug";
+                // unpackaged (zip/loose exe) builds: fall back to the assembly version so
+                // update checks work; "debug" would disable them entirely
+                try
+                {
+                    var asm = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+                    SettingsManager.Current.LastKnownVersion = asm != null && asm.Major > 0
+                        ? $"v{asm.Major}.{asm.Minor}.{asm.Build}"
+                        : "debug";
+                }
+                catch
+                {
+                    SettingsManager.Current.LastKnownVersion = "debug";
+                }
             }
 
             Logger.Info($"Current version: {SettingsManager.Current.LastKnownVersion}");

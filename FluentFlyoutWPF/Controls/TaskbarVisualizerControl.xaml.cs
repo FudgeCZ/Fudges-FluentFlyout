@@ -114,7 +114,7 @@ public partial class TaskbarVisualizerControl : UserControl
     {
         lock (_instancesLock)
         {
-            return _instances.Any(i => i.Settings.TaskbarVisualizerEnabled);
+            return _instances.Any(i => i.Settings.TaskbarWidgetEnabled && i.Settings.TaskbarVisualizerEnabled);
         }
     }
 

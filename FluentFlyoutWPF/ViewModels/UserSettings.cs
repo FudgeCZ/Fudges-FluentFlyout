@@ -955,6 +955,77 @@ public partial class UserSettings : ObservableObject
         SettingsManager.SaveSettings();
     }
 
+    /// <summary>
+    /// Enables or disables a taskbar feature ("Widget", "Visualizer", or "Lyrics") on a specific monitor index.
+    /// </summary>
+    public void SetMonitorFeatureEnabled(int monitorIndex, string feature, bool enabled)
+    {
+        if ((feature == "Widget" || feature == "Visualizer") && enabled && !IsPremiumUnlocked)
+            return;
+
+        SyncActiveMonitorFromUserSettings();
+
+        var profile = GetMonitorSettings(monitorIndex);
+        switch (feature)
+        {
+            case "Widget":
+                profile.TaskbarWidgetEnabled = enabled;
+                if (monitorIndex == TaskbarWidgetSelectedMonitor)
+                {
+                    _switchingMonitorProfile = true;
+                    try { TaskbarWidgetEnabled = enabled; }
+                    finally { _switchingMonitorProfile = false; }
+                }
+                TaskbarVisualizerControl.RefreshSharedVisualizerState();
+                break;
+
+            case "Visualizer":
+                profile.TaskbarVisualizerEnabled = enabled;
+                if (enabled && !profile.TaskbarWidgetEnabled && IsPremiumUnlocked)
+                {
+                    profile.TaskbarWidgetEnabled = true;
+                    if (monitorIndex == TaskbarWidgetSelectedMonitor)
+                    {
+                        _switchingMonitorProfile = true;
+                        try { TaskbarWidgetEnabled = true; }
+                        finally { _switchingMonitorProfile = false; }
+                    }
+                }
+                if (monitorIndex == TaskbarWidgetSelectedMonitor)
+                {
+                    _switchingMonitorProfile = true;
+                    try { TaskbarVisualizerEnabled = enabled; }
+                    finally { _switchingMonitorProfile = false; }
+                }
+                TaskbarVisualizerControl.RefreshSharedVisualizerState();
+                Application.Current?.Dispatcher?.BeginInvoke(() => TaskbarVisualizerControl.ApplyBeatGlow());
+                break;
+
+            case "Lyrics":
+                profile.LyricsEnabled = enabled;
+                if (enabled && !profile.TaskbarWidgetEnabled && IsPremiumUnlocked)
+                {
+                    profile.TaskbarWidgetEnabled = true;
+                    if (monitorIndex == TaskbarWidgetSelectedMonitor)
+                    {
+                        _switchingMonitorProfile = true;
+                        try { TaskbarWidgetEnabled = true; }
+                        finally { _switchingMonitorProfile = false; }
+                    }
+                }
+                if (monitorIndex == TaskbarWidgetSelectedMonitor)
+                {
+                    _switchingMonitorProfile = true;
+                    try { LyricsEnabled = enabled; }
+                    finally { _switchingMonitorProfile = false; }
+                }
+                break;
+        }
+
+        UpdateTaskbar();
+        SettingsManager.SaveSettings();
+    }
+
     public UserSettings()
     {
         foreach (var supportedLanguage in LocalizationManager.SupportedLanguages)

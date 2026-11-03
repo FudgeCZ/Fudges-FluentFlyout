@@ -92,18 +92,7 @@
         </Grid>
 
         <StackPanel Opacity="{Binding IsPremiumUnlocked, Converter={StaticResource BoolToFullHalfOpacityConverter}}">
-            <ui:CardControl x:Name="TaskbarWidgetSelectedMonitorTitleCard" Tag="Indexable" Grid.Row="2" Icon="{ui:SymbolIcon ProjectionScreen24}" Margin="0,0,0,12">
-                <ui:CardControl.Header>
-                    <StackPanel Orientation="Vertical">
-                        <TextBlock Text="{DynamicResource TaskbarWidgetSelectedMonitorTitle}" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
-                        <TextBlock Text="Configure taskbar widget, visualizer, and lyrics settings independently for each display." FontSize="12" Opacity="0.5" />
-                    </StackPanel>
-                </ui:CardControl.Header>
-                <StackPanel Orientation="Horizontal">
-                    <ComboBox x:Name="TaskbarWidgetSelectedMonitorComboBox" SelectedIndex="{Binding TaskbarWidgetSelectedMonitor, Mode=TwoWay}" IsEnabled="{Binding IsPremiumUnlocked}" Style="{StaticResource DefaultComboBoxStyle}" Margin="0,0,8,0" />
-                    <Button Content="Copy to all monitors" Click="CopyToAllMonitors_Click" IsEnabled="{Binding IsPremiumUnlocked}" />
-                </StackPanel>
-            </ui:CardControl>
+            <fluentflyoutcontrols:MonitorSelectorControl x:Name="TaskbarWidgetSelectedMonitorTitleCard" Tag="Indexable" FeatureMode="Widget" IsEnabled="{Binding IsPremiumUnlocked}" Margin="0,0,0,12" />
 
             <ui:CardControl x:Name="TaskbarWidgetEnabledTitleCard" Tag="Indexable" Grid.Row="2" Icon="{ui:SymbolIcon TextboxAlignBottom24}" Margin="0,0,0,24">
                 <ui:CardControl.Header>

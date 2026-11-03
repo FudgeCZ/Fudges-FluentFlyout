@@ -78,6 +78,26 @@ public partial class TaskbarWindow : Window
         if (_isClosing)
             return;
 
+        if (e.PropertyName == nameof(MonitorTaskbarSettings.TaskbarWidgetEnabled))
+        {
+            if (!MonitorSettings.TaskbarWidgetEnabled || !SettingsManager.Current.IsPremiumUnlocked)
+            {
+                HideTaskbarWindow();
+            }
+            else
+            {
+                Dispatcher.BeginInvoke(() =>
+                {
+                    WidgetCanvas.Visibility = Visibility.Visible;
+                    if (!_timer.IsEnabled)
+                        _timer.Start();
+                    _mainWindow?.UpdateTaskbar();
+                    UpdatePosition();
+                });
+            }
+            return;
+        }
+
         if (e.PropertyName is nameof(MonitorTaskbarSettings.TaskbarWidgetPosition)
             or nameof(MonitorTaskbarSettings.TaskbarWidgetPadding)
             or nameof(MonitorTaskbarSettings.TaskbarWidgetManualPadding)
@@ -91,6 +111,23 @@ public partial class TaskbarWindow : Window
         {
             UpdatePosition();
         }
+    }
+
+    private void HideTaskbarWindow()
+    {
+        if (_timer.IsEnabled)
+            _timer.Stop();
+
+        Dispatcher.Invoke(() =>
+        {
+            WidgetCanvas.Visibility = Visibility.Collapsed;
+            var interop = new WindowInteropHelper(this);
+            if (interop.Handle != IntPtr.Zero)
+            {
+                UpdateWindowRegion(interop.Handle);
+            }
+            Visibility = Visibility.Collapsed;
+        });
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -293,7 +330,10 @@ on_error:
 
         // Check premium status before allowing widget to be displayed
         if (!MonitorSettings.TaskbarWidgetEnabled || !SettingsManager.Current.IsPremiumUnlocked)
+        {
+            HideTaskbarWindow();
             return;
+        }
 
         try
         {
@@ -439,6 +479,15 @@ on_error:
             // so those coordinates need to be converted.
             POINT containerPos = new() { X = taskbarRect.Left, Y = taskbarRect.Top };
             ScreenToClient(taskbarHandle, ref containerPos);
+
+            if (!MonitorSettings.TaskbarWidgetEnabled || !SettingsManager.Current.IsPremiumUnlocked)
+            {
+                WidgetCanvas.Visibility = Visibility.Collapsed;
+                UpdateWindowRegion(taskbarWindowHandle);
+                return;
+            }
+
+            WidgetCanvas.Visibility = Visibility.Visible;
 
             // Apply using SetWindowPos (Bypassing WPF layout engine).
             // HWND_TOP keeps this child window at the top of the taskbar's child z-order:
@@ -763,15 +812,14 @@ on_error:
         // Check premium status - hide widget if not unlocked
         if (!settings.TaskbarWidgetEnabled || !SettingsManager.Current.IsPremiumUnlocked)
         {
-            if (_timer.IsEnabled) // pause timer to save resources
-                _timer.Stop();
-
-            Dispatcher.Invoke(() =>
-            {
-                Visibility = Visibility.Collapsed;
-            });
+            HideTaskbarWindow();
             return;
         }
+
+        Dispatcher.Invoke(() =>
+        {
+            WidgetCanvas.Visibility = Visibility.Visible;
+        });
 
         // Autohide - Widget hides when playback is paused
         _lastPlaybackStatus = playbackStatus;

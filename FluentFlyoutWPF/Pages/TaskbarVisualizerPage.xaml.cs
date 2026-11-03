@@ -18,23 +18,9 @@ public partial class TaskbarVisualizerPage : Page
         DataContext = SettingsManager.Current;
         Loaded += (_, _) =>
         {
-            UpdateMonitorList();
+            TaskbarVisualizerMonitorSelector.RenderMonitors();
             RefreshTargetItems();
         };
-        UpdateMonitorList();
-    }
-
-    private void UpdateMonitorList()
-    {
-        MonitorUtil.UpdateMonitorList(
-            TaskbarVisualizerSelectedMonitorComboBox,
-            () => SettingsManager.Current.TaskbarWidgetSelectedMonitor,
-            value => SettingsManager.Current.TaskbarWidgetSelectedMonitor = value);
-    }
-
-    private void CopyToAllMonitors_Click(object sender, RoutedEventArgs e)
-    {
-        SettingsManager.Current.CopyCurrentMonitorSettingsToAll(MonitorUtil.GetMonitors().Count);
     }
 
     // same as SystemPage.StartupHyperlink_RequestNavigate

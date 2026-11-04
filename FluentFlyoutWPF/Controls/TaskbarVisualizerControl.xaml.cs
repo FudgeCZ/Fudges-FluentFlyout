@@ -271,14 +271,22 @@ public partial class TaskbarVisualizerControl : UserControl
                 if (_glowEffect == null)
                     return;
 
+                // only touch the effect when a value meaningfully changed — every
+                // BlurRadius write forces a full shadow re-blur on the GPU
                 float energy = Math.Clamp(Visualizer.CurrentEnergy, 0f, 1f);
-                _glowEffect.BlurRadius = (float)(6 + energy * 30);
-                _glowEffect.Opacity = 0.15 + energy * 0.55;
+                double radius = 6 + energy * 30;
+                double opacity = 0.15 + energy * 0.55;
+                if (Math.Abs(_glowEffect.BlurRadius - radius) < 0.6 &&
+                    Math.Abs(_glowEffect.Opacity - opacity) < 0.02)
+                    return;
+
+                _glowEffect.BlurRadius = (float)radius;
+                _glowEffect.Opacity = opacity;
 
                 var brush = BitmapHelper.SavedDominantColors.Count > 0
                     ? BitmapHelper.SavedDominantColors.Last()
                     : (SolidColorBrush)System.Windows.Application.Current.TryFindResource("MicaWPF.Brushes.SystemAccentColorTertiary");
-                if (brush != null)
+                if (brush != null && _glowEffect.Color != brush.Color)
                     _glowEffect.Color = brush.Color;
             };
         }

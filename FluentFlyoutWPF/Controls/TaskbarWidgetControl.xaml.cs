@@ -990,9 +990,11 @@ public partial class TaskbarWidgetControl : UserControl
     }
 
     private bool _progressSubscribed;
+    private DateTime _lastProgressPaint = DateTime.MinValue;
 
     /// <summary>
-    /// Updates the fill every WPF render frame while playing (perfectly smooth),
+    /// Updates the fill at ~12 fps while playing (a 2 px bar doesn't benefit from
+    /// per-frame invalidation, which recomposited the whole widget at refresh rate),
     /// and unsubscribes when paused/collapsed.
     /// </summary>
     private void SubscribeProgressRendering(bool active)
@@ -1011,6 +1013,9 @@ public partial class TaskbarWidgetControl : UserControl
 
     private void OnProgressRendering(object? sender, EventArgs e)
     {
+        if ((DateTime.Now - _lastProgressPaint).TotalMilliseconds < 80)
+            return;
+        _lastProgressPaint = DateTime.Now;
         UpdateProgressFill();
     }
 

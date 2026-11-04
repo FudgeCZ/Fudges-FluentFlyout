@@ -37,6 +37,9 @@ public partial class TaskbarWindow : Window
     private AutomationElement? _widgetElement;
     private AutomationElement? _trayElement;
     private AutomationElement? _taskbarFrameElement;
+    private AutomationElement? _iconsAreaElement;       // cached taskbar root for the icons-area query
+    private Rect _iconsAreaRectCache = Rect.Empty;      // union of pinned/running app buttons + Start/Search
+    private DateTime _iconsAreaCacheTime = DateTime.MinValue;
     // reference to main window for flyout functions
     private MainWindow? _mainWindow;
     private int _lastSelectedMonitor = -1;
@@ -498,7 +501,16 @@ on_error:
                      containerPos.X, containerPos.Y,
                      containerWidth, containerHeight,
                      SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS | SWP_SHOWWINDOW);
-            var wRect = PositionWidget(taskbarHandle, taskbarRect, dpiScale, isMainTaskbarSelected, isVertical, Lyrics.HasContent);
+            double? iconsLeftRel = null;
+            if (!isVertical)
+            {
+                // physical px, taskbar-relative left edge of the pinned/running app
+                // icons — the boundary our widget chain must not cross
+                (bool iconsOk, Rect iconsRect) = GetTaskbarIconsAreaRect(taskbarHandle);
+                if (iconsOk)
+                    iconsLeftRel = iconsRect.Left - taskbarRect.Left;
+            }
+            var wRect = PositionWidget(taskbarHandle, taskbarRect, dpiScale, isMainTaskbarSelected, isVertical, Lyrics.HasContent, iconsLeftRel);
             var vRect = PositionVisualizer(taskbarHandle, taskbarRect, dpiScale, isMainTaskbarSelected, isVertical);
             var lRect = PositionLyrics(taskbarHandle, taskbarRect, dpiScale, isMainTaskbarSelected, isVertical);
 
@@ -512,13 +524,18 @@ on_error:
         }
     }
 
-    private Rect PositionWidget(IntPtr taskbarHandle, RECT taskbarRect, double dpiScale, bool isMainTaskbarSelected, bool isVertical, bool lyricsVisible)
+    private Rect PositionWidget(IntPtr taskbarHandle, RECT taskbarRect, double dpiScale, bool isMainTaskbarSelected, bool isVertical, bool lyricsVisible, double? iconsLeftRel = null)
     {
         var settings = MonitorSettings;
         if (!settings.TaskbarWidgetEnabled)
             return Rect.Empty;
 
         Widget.SetVerticalMode(isVertical);
+
+        // When the widget+visualizer+lyrics chain would run into the pinned/running
+        // app icons, narrow the widget only (the cap shrinks its song-text area in
+        // CalculateSize); the visualizer and lyrics keep their widths.
+        Widget.WidthCap = ComputeIconsOverlapCap(taskbarRect, dpiScale, settings, isVertical, lyricsVisible, iconsLeftRel);
 
         // Calculate widget size
         var (logicalWidth, logicalHeight) = Widget.CalculateSize(dpiScale);
@@ -713,6 +730,62 @@ on_error:
         double rectW = isVertical ? physicalHeight : physicalWidth;
         double rectH = isVertical ? physicalWidth : physicalHeight;
         return new Rect(Canvas.GetLeft(Widget) * dpiScale, Canvas.GetTop(Widget) * dpiScale, rectW, rectH);
+    }
+
+    /// <summary>
+    /// Widest logical width the widget may take so the widget+visualizer+lyrics chain
+    /// stays clear of the pinned/running app icons. Null when the icons area is unknown,
+    /// the taskbar is vertical, or the widget is end-aligned (its own tray alignment
+    /// governs that case). Start position: the chain begins at a known offset, so the
+    /// allowed width is boundary − chainStart − chainAfter. Center position: the widget
+    /// is centered, so solving chainEnd(w) ≤ boundary gives w ≤ 2·boundary − taskbarWidth
+    /// − vizWidth − lyricsWidth − margins.
+    /// </summary>
+    private double? ComputeIconsOverlapCap(RECT taskbarRect, double dpiScale, MonitorTaskbarSettings settings, bool isVertical, bool lyricsVisible, double? iconsLeftRel)
+    {
+        if (isVertical || iconsLeftRel is not double boundaryRel)
+            return null;
+        if (settings.TaskbarWidgetPosition is not (0 or 1))
+            return null;
+
+        double boundary = boundaryRel - 12; // physical px safety gap
+        double taskbarWidth = taskbarRect.Right - taskbarRect.Left;
+        double vizPhys = settings.TaskbarVisualizerEnabled ? TaskbarVisualizer.Width * dpiScale : 0;
+        double lyrPhys = lyricsVisible ? Lyrics.Width * dpiScale : 0;
+
+        double allowedPhys;
+        if (settings.TaskbarWidgetPosition == 0)
+        {
+            double chainStart = 20 + settings.TaskbarWidgetManualPadding;
+            // approximate widgets-button padding (exact button query would need another
+            // automation pass; the safety gap absorbs the difference)
+            if (settings.TaskbarWidgetPadding)
+                chainStart += _nativeWidgetsPadding + 2;
+            bool vizBefore = settings.TaskbarVisualizerEnabled && settings.TaskbarVisualizerPosition == 0;
+            bool lyrBefore = lyricsVisible && settings.TaskbarVisualizerPosition == 0;
+            if (vizBefore) chainStart += vizPhys + 4;
+            if (lyrBefore) chainStart += lyrPhys + 4;
+
+            double chainAfter = 0;
+            if (settings.TaskbarVisualizerEnabled && settings.TaskbarVisualizerPosition == 1) chainAfter += vizPhys + 4;
+            if (lyricsVisible && settings.TaskbarVisualizerPosition == 1) chainAfter += lyrPhys + 4;
+
+            allowedPhys = boundary - chainStart - chainAfter;
+        }
+        else
+        {
+            bool vizRight = settings.TaskbarVisualizerEnabled && settings.TaskbarVisualizerPosition == 1;
+            bool lyrRight = lyricsVisible && settings.TaskbarVisualizerPosition == 1;
+            double centerExtras = (vizRight ? vizPhys + 8 : 0) + (lyrRight ? lyrPhys + 8 : 0)
+                + (!vizRight && settings.TaskbarVisualizerEnabled ? vizPhys : 0)
+                + (!lyrRight && lyricsVisible ? lyrPhys : 0);
+            // manual padding shifts the centered group; each padding px moves the
+            // chain end one px right, and centering halves it back, so 2× total
+            allowedPhys = 2 * (boundary - settings.TaskbarWidgetManualPadding) - taskbarWidth - centerExtras;
+        }
+
+        double allowedLogical = allowedPhys / (dpiScale * _scale);
+        return Math.Max(allowedLogical, 120); // never crush the widget below a usable minimum
     }
 
     private Rect PositionVisualizer(IntPtr taskbarHandle, RECT taskbarRect, double dpiScale, bool isMainTaskbarSelected, bool isVertical)
@@ -985,6 +1058,70 @@ on_error:
     private (bool, Rect) GetTaskbarWidgetRect(IntPtr taskbarHandle)
     {
         return GetTaskbarXamlElementRect(taskbarHandle, ref _widgetElement, "WidgetsButton");
+    }
+
+    /// <summary>
+    /// Union rect of the taskbar's pinned/running app buttons plus Start and Search
+    /// (the "icons" a growing widget chain must not overlap). Cached for 10 s — the
+    /// union query is heavier than a single-element lookup and the icons move rarely.
+    /// Screen coordinates in physical pixels.
+    /// </summary>
+    private (bool success, Rect rect) GetTaskbarIconsAreaRect(IntPtr taskbarHandle)
+    {
+        if (taskbarHandle == IntPtr.Zero)
+            return (false, Rect.Empty);
+
+        if ((DateTime.Now - _iconsAreaCacheTime).TotalSeconds < 10)
+        {
+            bool cached = !_iconsAreaRectCache.IsEmpty;
+            return (cached, _iconsAreaRectCache);
+        }
+
+        try
+        {
+            if (_pendingAutomationTasks.TryGetValue("TaskbarIcons", out var pendingTask) && !pendingTask.IsCompleted)
+                return (false, Rect.Empty);
+
+            Rect? found = null;
+            var findTask = Task.Run(() =>
+            {
+                _iconsAreaElement ??= AutomationElement.FromHandle(taskbarHandle);
+                var condition = new OrCondition(
+                    new PropertyCondition(AutomationElement.ClassNameProperty, "Taskbar.TaskListButtonAutomationPeer"),
+                    new PropertyCondition(AutomationElement.AutomationIdProperty, "StartButton"),
+                    new PropertyCondition(AutomationElement.AutomationIdProperty, "SearchButton"));
+                var buttons = _iconsAreaElement.FindAll(TreeScope.Descendants, condition);
+                double minLeft = double.MaxValue, maxRight = double.MinValue;
+                foreach (AutomationElement button in buttons)
+                {
+                    Rect r = button.Current.BoundingRectangle;
+                    if (r.IsEmpty || r.Width <= 0)
+                        continue;
+                    minLeft = Math.Min(minLeft, r.Left);
+                    maxRight = Math.Max(maxRight, r.Right);
+                }
+                if (minLeft < maxRight)
+                    found = new Rect(minLeft, 0, maxRight - minLeft, 1);
+            });
+            _pendingAutomationTasks["TaskbarIcons"] = findTask;
+
+            if (!findTask.Wait(1000))
+                return (false, Rect.Empty);
+
+            findTask.GetAwaiter().GetResult();
+            if (found is { } rect)
+            {
+                _iconsAreaRectCache = rect;
+                _iconsAreaCacheTime = DateTime.Now;
+                return (true, rect);
+            }
+            return (false, Rect.Empty);
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed to measure taskbar icon area");
+            return (false, Rect.Empty);
+        }
     }
 
     private (bool, Rect) GetSystemTrayRect(IntPtr taskbarHandle)

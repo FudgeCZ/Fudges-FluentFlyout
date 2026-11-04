@@ -78,6 +78,14 @@ public partial class TaskbarWidgetControl : UserControl
     private bool _isVertical;
     private bool _isSmallTaskbar;
 
+    /// <summary>
+    /// External upper bound for the total logical width (logical DIPs), set by
+    /// TaskbarWindow when the widget chain would collide with the taskbar's
+    /// pinned/running app icons. Null = no cap. Only the song-text area shrinks;
+    /// cover, controls and the time readout keep their space.
+    /// </summary>
+    public double? WidthCap { get; set; }
+
     internal MonitorTaskbarSettings Settings { get; private set; } = new();
 
     public TaskbarWidgetControl()
@@ -342,6 +350,20 @@ public partial class TaskbarWidgetControl : UserControl
     {
         double coverImageMargin = _isSmallTaskbar ? SmallCoverImageMargin : DefaultCoverImageMargin;
 
+        // space fixed parts need on top of the song text (controls + time readout);
+        // computed up front so the external width cap can budget the text area
+        double extrasWidth = 0;
+        if (Settings.TaskbarWidgetControlsEnabled && ControlsStackPanel.Visibility == Visibility.Visible)
+        {
+            foreach (var button in new[] { ShuffleButton, PreviousButton, PlayPauseButton, NextButton, RepeatButton })
+                if (button.Visibility == Visibility.Visible)
+                    extrasWidth += button.Width;
+            if (!_isVertical)
+                extrasWidth += ControlsStackPanel.Margin.Left + ControlsStackPanel.Margin.Right;
+        }
+        if (Settings.TaskbarWidgetTimeEnabled && !_isVertical && !string.IsNullOrEmpty(_timeText))
+            extrasWidth += StringWidth.GetStringWidth(_timeText, 400) + TimeText.Margin.Left + TimeText.Margin.Right + 2;
+
         // calculate widget width - use cached values if text hasn't changed
         string currentTitle = _actualTitle;
         string currentArtist = _actualArtist;
@@ -382,6 +404,15 @@ public partial class TaskbarWidgetControl : UserControl
             logicalWidth = Math.Min(logicalWidth, maxLogicalWidth);
         }
 
+        // external cap (taskbar icon-area avoidance): shrink only the song-text
+        // area so text + cover + controls + time all fit inside the bound
+        if (WidthCap is double widthCap && !_isVertical && logicalWidth + extrasWidth > widthCap)
+        {
+            double textPart = logicalWidth - coverImageMargin - _extraMarginForText;
+            double newTextPart = Math.Max(30, textPart - (logicalWidth + extrasWidth - widthCap));
+            logicalWidth = newTextPart + coverImageMargin + _extraMarginForText;
+        }
+
         double newTitleContainerWidth = Math.Max(logicalWidth - coverImageMargin, 0);
         double newArtistContainerWidth = Math.Max(logicalWidth - coverImageMargin, 0);
         bool widthChanged = false;
@@ -406,24 +437,8 @@ public partial class TaskbarWidgetControl : UserControl
             UpdateMarquees();
         }
 
-        // add space for playback controls if enabled and visible
-        if (Settings.TaskbarWidgetControlsEnabled && ControlsStackPanel.Visibility == Visibility.Visible)
-        {
-            double controlsWidth = 0;
-            foreach (var button in new[] { ShuffleButton, PreviousButton, PlayPauseButton, NextButton, RepeatButton })
-                if (button.Visibility == Visibility.Visible)
-                    controlsWidth += button.Width;
-            if (!_isVertical)
-                controlsWidth += ControlsStackPanel.Margin.Left + ControlsStackPanel.Margin.Right;
-
-            logicalWidth += controlsWidth;
-        }
-
-        // add space for the time readout if enabled and showing something
-        if (Settings.TaskbarWidgetTimeEnabled && !_isVertical && !string.IsNullOrEmpty(_timeText))
-        {
-            logicalWidth += StringWidth.GetStringWidth(_timeText, 400) + TimeText.Margin.Left + TimeText.Margin.Right + 2;
-        }
+        // add space for playback controls and the time readout (summed above)
+        logicalWidth += extrasWidth;
 
         double logicalHeight = _isSmallTaskbar ? SmallTaskbarWidgetHeight : DefaultTaskbarWidgetHeight;
 

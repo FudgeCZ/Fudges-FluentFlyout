@@ -40,6 +40,15 @@ public partial class TaskbarWindow : Window
     private AutomationElement? _iconsAreaElement;       // cached taskbar root for the icons-area query
     private Rect _iconsAreaRectCache = Rect.Empty;      // union of pinned/running app buttons + Start/Search
     private DateTime _iconsAreaCacheTime = DateTime.MinValue;
+
+    // icon-cap glide animation: the width cap eases to its target over a few frames
+    // so the widget (and the viz/lyrics chain riding on it) resizes smoothly
+    private DispatcherTimer? _capAnimTimer;
+    private double _capAnimFrom;
+    private double _capAnimTo;
+    private DateTime _capAnimStart;
+    private bool _capAnimating;
+    private const double CapAnimationMs = 280;
     // reference to main window for flyout functions
     private MainWindow? _mainWindow;
     private int _lastSelectedMonitor = -1;
@@ -534,8 +543,9 @@ on_error:
 
         // When the widget+visualizer+lyrics chain would run into the pinned/running
         // app icons, narrow the widget only (the cap shrinks its song-text area in
-        // CalculateSize); the visualizer and lyrics keep their widths.
-        Widget.WidthCap = ComputeIconsOverlapCap(taskbarRect, dpiScale, settings, isVertical, lyricsVisible, iconsLeftRel);
+        // CalculateSize); the visualizer and lyrics keep their widths. The cap
+        // eases toward its target so the resize glides instead of snapping.
+        Widget.WidthCap = ResolveAnimatedCap(ComputeIconsOverlapCap(taskbarRect, dpiScale, settings, isVertical, lyricsVisible, iconsLeftRel));
 
         // Calculate widget size
         var (logicalWidth, logicalHeight) = Widget.CalculateSize(dpiScale);
@@ -730,6 +740,91 @@ on_error:
         double rectW = isVertical ? physicalHeight : physicalWidth;
         double rectH = isVertical ? physicalWidth : physicalHeight;
         return new Rect(Canvas.GetLeft(Widget) * dpiScale, Canvas.GetTop(Widget) * dpiScale, rectW, rectH);
+    }
+
+    /// <summary>
+    /// Returns the width cap the widget should use this frame: the target cap eased
+    /// toward from the previous value (re-laying out + re-regions every animation
+    /// frame via <see cref="UpdatePosition"/>), or null when no cap applies. The
+    /// first measurement snaps so the widget never animates on its own appearance.
+    /// </summary>
+    private double? ResolveAnimatedCap(double? targetCap)
+    {
+        if (targetCap is not double target)
+        {
+            StopCapAnimation();
+            return null;
+        }
+
+        if (!_capAnimating)
+        {
+            double current = Widget.WidthCap ?? target;
+            if (Math.Abs(target - current) < 2)
+            {
+                Widget.WidthCap = target;
+                return target;
+            }
+
+            _capAnimating = true;
+            _capAnimFrom = current;
+            _capAnimTo = target;
+            _capAnimStart = DateTime.Now;
+            _capAnimTimer ??= CreateCapAnimationTimer();
+            _capAnimTimer.Start();
+            return current;
+        }
+
+        // mid-animation: retarget from the current interpolated value
+        double frame = InterpolatedCap();
+        if (Math.Abs(_capAnimTo - target) >= 2)
+        {
+            _capAnimFrom = frame;
+            _capAnimTo = target;
+            _capAnimStart = DateTime.Now;
+        }
+
+        if ((DateTime.Now - _capAnimStart).TotalMilliseconds >= CapAnimationMs)
+        {
+            StopCapAnimation();
+            Widget.WidthCap = _capAnimTo;
+            return _capAnimTo;
+        }
+        return frame;
+    }
+
+    private double InterpolatedCap()
+    {
+        double p = Math.Min(1.0, (DateTime.Now - _capAnimStart).TotalMilliseconds / CapAnimationMs);
+        double eased = 1 - Math.Pow(1 - p, 3); // cubic ease-out
+        return _capAnimFrom + (_capAnimTo - _capAnimFrom) * eased;
+    }
+
+    private void StopCapAnimation()
+    {
+        _capAnimating = false;
+        _capAnimTimer?.Stop();
+    }
+
+    private DispatcherTimer CreateCapAnimationTimer()
+    {
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
+        timer.Tick += (_, _) =>
+        {
+            if (!_capAnimating)
+            {
+                timer.Stop();
+                return;
+            }
+
+            Widget.WidthCap = InterpolatedCap();
+            if ((DateTime.Now - _capAnimStart).TotalMilliseconds >= CapAnimationMs)
+            {
+                StopCapAnimation();
+                Widget.WidthCap = _capAnimTo;
+            }
+            UpdatePosition(); // re-layout + re-region every frame while the cap glides
+        };
+        return timer;
     }
 
     /// <summary>

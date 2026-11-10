@@ -1399,9 +1399,14 @@ public partial class MainWindow : MicaWindow
                     // builds the OSD window can't be found and hidden after the
                     // fact (it lives inside the taskbar's own XAML island), so
                     // swallowing is the only reliable suppression.
-                    volumeMixerWindow.Dispatcher.InvokeAsync(
-                        () => volumeMixerWindow.ViewModel.ApplyVolumeKey(vkCode));
-                    return (IntPtr)1; // swallow
+                    // Apply on key-down only: the key-up would otherwise double the
+                    // step (the hook sees both events of one physical press).
+                    if (isKeyDown)
+                    {
+                        volumeMixerWindow.Dispatcher.InvokeAsync(
+                            () => volumeMixerWindow.ViewModel.ApplyVolumeKey(vkCode));
+                    }
+                    return (IntPtr)1; // swallow down and up alike
                 }
 
                 if (!result)

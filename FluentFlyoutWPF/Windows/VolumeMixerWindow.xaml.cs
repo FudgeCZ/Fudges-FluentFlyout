@@ -74,13 +74,13 @@ public partial class VolumeMixerWindow : MicaWindow
 
         _lastFlyoutTime = currentTime;
 
+        // never let the native OSD share the screen with our flyout — hide it on
+        // every show, not only when the flyout was mid-hide. The OSD window can be
+        // appearing from the very same key press, hence the retry.
+        _ = Task.Run(HideVolumeOsdWithRetry);
+
         if (_isHiding)
         {
-            _ = Task.Run(() =>
-            {
-                HideVolumeOsd();
-            });
-
             _isHiding = false;
             if (SettingsManager.Current.VolumeMixerAcrylicWindowEnabled)
             {
@@ -223,6 +223,23 @@ public partial class VolumeMixerWindow : MicaWindow
     }
 
     // derived from gpkgpk/HideVolumeOSD: https://github.com/gpkgpk/HideVolumeOSD
+
+    /// <summary>
+    /// Hides the native volume OSD, retrying briefly — Windows creates the OSD
+    /// window lazily on the first volume change of a session, so a hide issued at
+    /// the same moment as a key press can otherwise run before it exists.
+    /// </summary>
+    private static void HideVolumeOsdWithRetry()
+    {
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            HideVolumeOsd();
+            if (_nativeOsdElement != IntPtr.Zero)
+                return;
+            Thread.Sleep(150);
+        }
+    }
+
     private static void HideVolumeOsd()
     {
         if (_nativeOsdElement != IntPtr.Zero)

@@ -1391,6 +1391,19 @@ public partial class MainWindow : MicaWindow
 
                 ShowVolumeFlyout();
 
+                if (volumeKeysPressed && SettingsManager.Current.VolumeControlEnabled && volumeMixerWindow != null)
+                {
+                    // Windows never sees this key (swallowed below), so the native
+                    // volume OSD can't appear next to our flyout — apply the step
+                    // ourselves on the audio endpoint instead. On current Windows
+                    // builds the OSD window can't be found and hidden after the
+                    // fact (it lives inside the taskbar's own XAML island), so
+                    // swallowing is the only reliable suppression.
+                    volumeMixerWindow.Dispatcher.InvokeAsync(
+                        () => volumeMixerWindow.ViewModel.ApplyVolumeKey(vkCode));
+                    return (IntPtr)1; // swallow
+                }
+
                 if (!result)
                 {
                     return CallNextHookEx(_hookId, nCode, wParam, lParam);

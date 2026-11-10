@@ -133,6 +133,20 @@ public partial class VolumeMixerViewModel : ObservableObject, IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Applies a hardware volume-key step (volume up/down/mute) locally — used when
+    /// the keyboard hook swallows the key so the native volume OSD can't appear.
+    /// </summary>
+    public void ApplyVolumeKey(int vkCode)
+    {
+        switch (vkCode)
+        {
+            case 0xAF: TryAdjustMasterVolume(+0.02f); break; // volume up
+            case 0xAE: TryAdjustMasterVolume(-0.02f); break; // volume down
+            case 0xAD: ToggleMasterMute(); break;            // mute
+        }
+    }
+
     public bool TryAdjustSessionVolume(int processId, float delta)
     {
         var session = FindSession(processId);

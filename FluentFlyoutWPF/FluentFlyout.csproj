@@ -22,7 +22,7 @@
     <DefineConstants>GITHUB_RELEASE</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="11.0.0" />
     <Content Remove="C:\Users\hu8go\.nuget\packages\dubya.windowsmediacontroller\2.5.5\contentFiles\any\net6.0-windows10.0.22000\Icon.ico" />
   </ItemGroup>
   <ItemGroup>

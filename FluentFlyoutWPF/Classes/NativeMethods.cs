@@ -174,7 +174,6 @@ public static partial class NativeMethods
         public POINT ptMinPosition;
         public POINT ptMaxPosition;
         public RECT rcNormalPosition;
-        public RECT rcDevice;
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
@@ -233,7 +232,9 @@ public static partial class NativeMethods
 
     #region Delegates
 
+    [return: MarshalAs(UnmanagedType.Bool)]
     internal delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [return: MarshalAs(UnmanagedType.Bool)]
     internal delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdcMonitor, ref RECT lprcMonitor, IntPtr dwData);
     internal delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
 
@@ -294,9 +295,14 @@ public static partial class NativeMethods
     // DllImport instead of LibraryImport for SetWindowPos because for some reason it functions differently when using LibraryImport,
     // causing windows to not be topmost and it to be hidden unless you focus on the taskbar.
     [DllImport("user32.dll", SetLastError = true)]
-    internal static extern bool SetWindowPos(IntPtr hWnd, int hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+
+    internal static bool SetWindowPos(IntPtr hWnd, int hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags) =>
+        SetWindowPos(hWnd, (IntPtr)hWndInsertAfter, x, y, cx, cy, uFlags);
 
     [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     [LibraryImport("user32.dll")]
@@ -304,6 +310,7 @@ public static partial class NativeMethods
     internal static partial bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
 
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool EnumDisplayDevices(string? lpDevice, uint iDevNum, ref DISPLAY_DEVICE lpDisplayDevice, uint dwFlags);
 
     [LibraryImport("user32.dll")]
@@ -311,6 +318,7 @@ public static partial class NativeMethods
     internal static partial bool EnumDisplayMonitors(IntPtr hdc, IntPtr lprcClip, MonitorEnumProc lpfnEnum, IntPtr dwData);
 
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFOEX lpmi);
 
     [LibraryImport("user32.dll")]

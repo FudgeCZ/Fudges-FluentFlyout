@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 using FluentFlyout.Classes;
-using FluentFlyoutWPF.Classes.Services;
 using Microsoft.Toolkit.Uwp.Notifications;
 using System.Windows;
+using System.Windows.Threading;
 
 namespace FluentFlyoutWPF;
 
@@ -13,20 +13,35 @@ namespace FluentFlyoutWPF;
 /// </summary>
 public partial class App : Application
 {
-    protected override async void OnStartup(StartupEventArgs e)
+    private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
+
+    protected override void OnStartup(StartupEventArgs e)
     {
         // log unhandled exceptions before crashing
         AppDomain.CurrentDomain.UnhandledException += (sender, args) =>
         {
-            NLog.LogManager.GetCurrentClassLogger().Fatal(args.ExceptionObject as Exception, "Unhandled exception occurred");
+            Logger.Fatal(args.ExceptionObject as Exception, "Unhandled exception occurred");
             NLog.LogManager.Flush(); // Ensure logs are written before application dies
         };
+
+        DispatcherUnhandledException += OnDispatcherUnhandledException;
+        TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
 
         // Register AUMID for toast notifications
         ToastNotificationManagerCompat.OnActivated += Notifications.HandleNotificationActivation;
 
-        await ExperimentsService.GetExperimentsAsync();
-
         base.OnStartup(e);
+    }
+
+    private static void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
+    {
+        Logger.Error(e.Exception, "Unhandled dispatcher exception occurred");
+        NLog.LogManager.Flush();
+    }
+
+    private static void OnUnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
+    {
+        Logger.Error(e.Exception, "Unobserved task exception occurred");
+        e.SetObserved();
     }
 }

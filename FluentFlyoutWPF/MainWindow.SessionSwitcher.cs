@@ -12,6 +12,8 @@ namespace FluentFlyoutWPF;
 
 public partial class MainWindow
 {
+    private bool _isSessionMenuOpen;
+
     public IReadOnlyList<MediaSession> GetSwitchableSessions()
     {
         return mediaManager.CurrentMediaSessions.Values.Where(IsSessionAllowed).ToList();
@@ -31,6 +33,8 @@ public partial class MainWindow
             Placement = System.Windows.Controls.Primitives.PlacementMode.Top
         };
 
+        menu.Opened += (_, _) => _isSessionMenuOpen = true;
+        menu.Closed += (_, _) => _isSessionMenuOpen = false;
         PopulateSessionSwitcherMenu(menu);
         menu.IsOpen = true;
     }

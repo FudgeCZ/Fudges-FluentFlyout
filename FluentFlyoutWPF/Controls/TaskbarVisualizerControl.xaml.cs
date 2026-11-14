@@ -29,7 +29,7 @@ public partial class TaskbarVisualizerControl : UserControl
     /// <summary>The single shared Visualizer instance (for static hooks).</summary>
     internal static Visualizer SharedVisualizer => visualizer;
 
-    private static readonly List<TaskbarVisualizerControl> _instances = [];
+    private static readonly List<WeakReference<TaskbarVisualizerControl>> _instances = [];
     private static readonly object _instancesLock = new();
     private static System.Windows.Media.Effects.DropShadowEffect? _glowEffect;
     private static System.Windows.Threading.DispatcherTimer? _glowTimer;
@@ -45,19 +45,14 @@ public partial class TaskbarVisualizerControl : UserControl
     {
         InitializeComponent();
 
-        lock (_instancesLock)
-        {
-            if (!_instances.Contains(this))
-                _instances.Add(this);
-        }
+        RegisterInstance(this);
 
         Loaded += (_, _) =>
         {
-            lock (_instancesLock)
-            {
-                if (!_instances.Contains(this))
-                    _instances.Add(this);
-            }
+            RegisterInstance(this);
+            Settings.PropertyChanged -= Settings_PropertyChanged;
+            Settings.PropertyChanged += Settings_PropertyChanged;
+            UpdateBaselineVisibilityState();
             RefreshSharedVisualizerState();
             ApplyBeatGlow();
         };
@@ -65,10 +60,7 @@ public partial class TaskbarVisualizerControl : UserControl
         Unloaded += (_, _) =>
         {
             Settings.PropertyChanged -= Settings_PropertyChanged;
-            lock (_instancesLock)
-            {
-                _instances.Remove(this);
-            }
+            UnregisterInstance(this);
             RefreshSharedVisualizerState();
             ApplyBeatGlow();
         };
@@ -102,20 +94,61 @@ public partial class TaskbarVisualizerControl : UserControl
         ApplyBeatGlow();
     }
 
+    private static void RegisterInstance(TaskbarVisualizerControl control)
+    {
+        lock (_instancesLock)
+        {
+            bool exists = false;
+            for (int i = _instances.Count - 1; i >= 0; i--)
+            {
+                if (!_instances[i].TryGetTarget(out var target))
+                {
+                    _instances.RemoveAt(i);
+                }
+                else if (ReferenceEquals(target, control))
+                {
+                    exists = true;
+                }
+            }
+            if (!exists)
+                _instances.Add(new WeakReference<TaskbarVisualizerControl>(control));
+        }
+    }
+
+    private static void UnregisterInstance(TaskbarVisualizerControl control)
+    {
+        lock (_instancesLock)
+        {
+            for (int i = _instances.Count - 1; i >= 0; i--)
+            {
+                if (!_instances[i].TryGetTarget(out var target) || ReferenceEquals(target, control))
+                {
+                    _instances.RemoveAt(i);
+                }
+            }
+        }
+    }
+
     internal static List<TaskbarVisualizerControl> GetActiveInstances()
     {
         lock (_instancesLock)
         {
-            return [.. _instances];
+            List<TaskbarVisualizerControl> active = [];
+            for (int i = _instances.Count - 1; i >= 0; i--)
+            {
+                if (_instances[i].TryGetTarget(out var target))
+                    active.Add(target);
+                else
+                    _instances.RemoveAt(i);
+            }
+            active.Reverse();
+            return active;
         }
     }
 
     internal static bool HasAnyEnabledInstance()
     {
-        lock (_instancesLock)
-        {
-            return _instances.Any(i => i.Settings.TaskbarWidgetEnabled && i.Settings.TaskbarVisualizerEnabled);
-        }
+        return GetActiveInstances().Any(i => i.Settings.TaskbarWidgetEnabled && i.Settings.TaskbarVisualizerEnabled);
     }
 
     internal void EnsureBarArrays(int barCount)
@@ -147,7 +180,8 @@ public partial class TaskbarVisualizerControl : UserControl
         {
             ApplyLength(Settings.TaskbarVisualizerLength);
         }
-        else if (e.PropertyName == nameof(MonitorTaskbarSettings.TaskbarVisualizerEnabled))
+        else if (e.PropertyName is nameof(MonitorTaskbarSettings.TaskbarVisualizerEnabled)
+            or nameof(MonitorTaskbarSettings.TaskbarWidgetEnabled))
         {
             UpdateBaselineVisibilityState();
             RefreshSharedVisualizerState();
@@ -170,7 +204,7 @@ public partial class TaskbarVisualizerControl : UserControl
 
     private void UpdateBaselineVisibilityState()
     {
-        if (!Settings.TaskbarVisualizerEnabled)
+        if (!Settings.TaskbarWidgetEnabled || !Settings.TaskbarVisualizerEnabled)
         {
             Settings.TaskbarVisualizerHasContent = false;
         }
@@ -237,7 +271,10 @@ public partial class TaskbarVisualizerControl : UserControl
         System.Windows.Application.Current.Dispatcher.VerifyAccess();
 
         var instances = GetActiveInstances();
-        bool anyGlowEnabled = instances.Any(i => i.Settings.TaskbarVisualizerEnabled && i.Settings.TaskbarVisualizerBeatGlow);
+        bool anyGlowEnabled = instances.Any(i =>
+            i.Settings.TaskbarWidgetEnabled &&
+            i.Settings.TaskbarVisualizerEnabled &&
+            i.Settings.TaskbarVisualizerBeatGlow);
 
         if (!anyGlowEnabled)
         {
@@ -258,7 +295,9 @@ public partial class TaskbarVisualizerControl : UserControl
 
         foreach (var inst in instances)
         {
-            inst.MainBorder.Effect = (inst.Settings.TaskbarVisualizerEnabled && inst.Settings.TaskbarVisualizerBeatGlow)
+            inst.MainBorder.Effect = (inst.Settings.TaskbarWidgetEnabled &&
+                                      inst.Settings.TaskbarVisualizerEnabled &&
+                                      inst.Settings.TaskbarVisualizerBeatGlow)
                 ? _glowEffect
                 : null;
         }
@@ -346,8 +385,7 @@ public partial class TaskbarVisualizerControl : UserControl
 
     private void Grid_MouseLeave(object sender, MouseEventArgs e)
     {
-        if (!Settings.TaskbarVisualizerClickable || !Settings.TaskbarVisualizerHasContent) return;
-
+        // Always clear hover styling even if content/clickable changed while hovered
         // Animate back to transparent
         var backgroundAnimation = new ColorAnimation
         {

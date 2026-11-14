@@ -28,7 +28,7 @@ public static class LyricsProviders
         LrcLib => "LRCLIB",
         Musixmatch => "Musixmatch",
         YouTubeMusic => "YouTube Music",
-        _ => "LRCLIB",
+        _ => $"Provider({provider})",
     };
 
     /// <summary>All providers in fallback order (main provider first, then the rest).</summary>

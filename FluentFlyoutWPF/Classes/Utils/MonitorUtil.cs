@@ -27,6 +27,8 @@ public static class MonitorUtil
     public static MonitorInfo GetSelectedMonitor(int index = 0)
     {
         var monitors = GetMonitors();
+        if (monitors.Count == 0)
+            return default;
         return monitors[Math.Clamp(index, 0, monitors.Count - 1)];
     }
 
@@ -89,7 +91,7 @@ public static class MonitorUtil
         }
 
         var monitor = GetMonitor(new POINT { X = (int)left, Y = (int)top });
-        if (monitor.workArea.IsEmpty)
+        if (monitor.workArea.IsEmpty || monitor.workArea.Width <= 0 || monitor.workArea.Height <= 0)
         {
             return SystemParameters.WorkArea;
         }
@@ -144,6 +146,12 @@ public static class MonitorUtil
         int savedIndex = getSelectedIndex();
         comboBox.Items.Clear();
 
+        if (monitors.Count == 0)
+        {
+            comboBox.SelectedIndex = -1;
+            return;
+        }
+
         bool resetToPrimary =
             savedIndex >= monitors.Count ||
             savedIndex < 0;
@@ -168,6 +176,7 @@ public static class MonitorUtil
             comboBox.Items.Add(cb);
         }
 
+        selectedMonitor = Math.Clamp(selectedMonitor, 0, monitors.Count - 1);
         comboBox.SelectedIndex = selectedMonitor;
         setSelectedIndex(selectedMonitor);
     }

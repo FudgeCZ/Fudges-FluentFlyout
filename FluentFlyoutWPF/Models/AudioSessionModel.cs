@@ -9,9 +9,12 @@ using System.Windows.Media;
 
 namespace FluentFlyoutWPF.Models;
 
-public partial class AudioSessionModel : ObservableObject
+public partial class AudioSessionModel : ObservableObject, IDisposable
 {
+    private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
     private readonly AudioSessionControl _sessionControl;
+    private bool _syncingFromDevice;
+    private bool _disposed;
 
     [ObservableProperty]
     public partial string DisplayName { get; set; }
@@ -43,20 +46,35 @@ public partial class AudioSessionModel : ObservableObject
         ProcessId = processId;
         State = sessionState;
         Icon = icon;
-        Volume = _sessionControl.SimpleAudioVolume.Volume;
-        IsMuted = _sessionControl.SimpleAudioVolume.Mute;
+
+        _syncingFromDevice = true;
+        try
+        {
+            Volume = _sessionControl.SimpleAudioVolume.Volume;
+            IsMuted = _sessionControl.SimpleAudioVolume.Mute;
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed to read initial audio session volume for '{0}'", displayName);
+        }
+        finally
+        {
+            _syncingFromDevice = false;
+        }
     }
 
     partial void OnVolumeChanged(float value)
     {
-        _sessionControl.SimpleAudioVolume.Volume = Math.Clamp(value, 0f, 1f);
-        if (Volume == 0f)
+        if (_syncingFromDevice || _disposed) return;
+
+        try
         {
-            IsMuted = true;
+            _sessionControl.SimpleAudioVolume.Volume = Math.Clamp(value, 0f, 1f);
+            IsMuted = value == 0f;
         }
-        else
+        catch (Exception ex)
         {
-            IsMuted = false;
+            Logger.Debug(ex, "Failed to update audio session volume for '{0}'", DisplayName);
         }
 
         VolumeChanged?.Invoke(this, EventArgs.Empty);
@@ -64,7 +82,16 @@ public partial class AudioSessionModel : ObservableObject
 
     partial void OnIsMutedChanged(bool value)
     {
-        _sessionControl.SimpleAudioVolume.Mute = value;
+        if (_syncingFromDevice || _disposed) return;
+
+        try
+        {
+            _sessionControl.SimpleAudioVolume.Mute = value;
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed to update audio session mute for '{0}'", DisplayName);
+        }
     }
 
     public void AdjustVolume(float delta)
@@ -80,13 +107,48 @@ public partial class AudioSessionModel : ObservableObject
     /// </summary>
     public void SyncFromDevice()
     {
-        var vol = _sessionControl.SimpleAudioVolume.Volume;
-        var mute = _sessionControl.SimpleAudioVolume.Mute;
+        if (_disposed) return;
 
-        if (MathF.Abs(Volume - vol) > 0.001f)
-            Volume = vol;
+        try
+        {
+            var vol = _sessionControl.SimpleAudioVolume.Volume;
+            var mute = _sessionControl.SimpleAudioVolume.Mute;
 
-        if (IsMuted != mute)
-            IsMuted = mute;
+            _syncingFromDevice = true;
+            try
+            {
+                if (MathF.Abs(Volume - vol) > 0.001f)
+                    Volume = vol;
+
+                if (IsMuted != mute)
+                    IsMuted = mute;
+            }
+            finally
+            {
+                _syncingFromDevice = false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed to sync audio session '{0}' from device", DisplayName);
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        VolumeChanged = null;
+
+        try
+        {
+            _sessionControl.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed to dispose AudioSessionControl for '{0}'", DisplayName);
+        }
+
+        GC.SuppressFinalize(this);
     }
 }

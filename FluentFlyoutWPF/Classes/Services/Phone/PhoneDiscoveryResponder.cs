@@ -4,6 +4,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 
 namespace FluentFlyoutWPF.Classes.Services.Phone;
 
@@ -16,53 +17,90 @@ public sealed class PhoneDiscoveryResponder : IDisposable
 {
     private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
 
+    private readonly Lock _lock = new();
     private UdpClient? _udp;
     private CancellationTokenSource? _cts;
-    public int TcpPort { get; set; } = 58710;
+    private volatile int _tcpPort = 58710;
+    private bool _disposed;
+
+    public int TcpPort
+    {
+        get => _tcpPort;
+        set => _tcpPort = value;
+    }
 
     public bool Start(int udpPort = 58711)
     {
-        Stop();
-        try
+        lock (_lock)
         {
-            _udp = new UdpClient(udpPort);
-            _cts = new CancellationTokenSource();
-            _ = ListenAsync(_cts.Token);
-            Logger.Info("Phone discovery responder listening on udp/{0}, answering tcp/{1}", udpPort, TcpPort);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Logger.Warn(ex, "Phone discovery responder failed to start (non-fatal)");
-            _udp = null;
-            return false;
+            if (_disposed) return false;
+            StopLocked();
+            UdpClient? udp = null;
+            CancellationTokenSource? cts = null;
+            try
+            {
+                udp = new UdpClient(udpPort);
+                cts = new CancellationTokenSource();
+                _udp = udp;
+                _cts = cts;
+                _ = ListenAsync(udp, cts.Token);
+                Logger.Info("Phone discovery responder listening on udp/{0}, answering tcp/{1}", udpPort, _tcpPort);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Phone discovery responder failed to start (non-fatal)");
+                try { cts?.Dispose(); } catch { }
+                try { udp?.Dispose(); } catch { }
+                _udp = null;
+                _cts = null;
+                return false;
+            }
         }
     }
 
-    private async Task ListenAsync(CancellationToken ct)
+    private async Task ListenAsync(UdpClient udp, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                var res = await _udp!.ReceiveAsync(ct).ConfigureAwait(false);
+                var res = await udp.ReceiveAsync(ct).ConfigureAwait(false);
                 var text = Encoding.ASCII.GetString(res.Buffer).Trim();
                 if (text != "PML_DISCOVER") continue;
-                var reply = Encoding.UTF8.GetBytes(
-                    $$"""{"name":"{{Environment.MachineName}}","tcp":{{TcpPort}}}""");
-                await _udp.SendAsync(reply, res.RemoteEndPoint).ConfigureAwait(false);
+                var reply = JsonSerializer.SerializeToUtf8Bytes(new { name = Environment.MachineName, tcp = _tcpPort });
+                await udp.SendAsync(reply, res.RemoteEndPoint, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) { break; }
+            catch (ObjectDisposedException) { break; }
             catch (Exception ex) { Logger.Debug(ex, "Phone discovery receive error"); }
         }
     }
 
     public void Stop()
     {
-        try { _cts?.Cancel(); _udp?.Dispose(); } catch { }
+        lock (_lock)
+        {
+            StopLocked();
+        }
+    }
+
+    private void StopLocked()
+    {
+        try { _cts?.Cancel(); } catch { }
+        try { _cts?.Dispose(); } catch { }
+        try { _udp?.Dispose(); } catch { }
         _udp = null;
         _cts = null;
     }
 
-    public void Dispose() => Stop();
+    public void Dispose()
+    {
+        lock (_lock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            StopLocked();
+        }
+    }
 }

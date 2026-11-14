@@ -16,7 +16,11 @@ namespace FluentFlyoutWPF.Windows;
 /// </summary>
 public partial class NextUpWindow : MicaWindow
 {
-    MainWindow mainWindow = (MainWindow)Application.Current.MainWindow;
+    private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
+    private readonly MainWindow _mainWindow = (MainWindow)Application.Current.MainWindow;
+    private readonly CancellationTokenSource _cts = new();
+    private bool _isClosed;
+
     public NextUpWindow(string title, string artist, BitmapImage? thumbnail)
     {
         DataContext = SettingsManager.Current;
@@ -28,6 +32,18 @@ public partial class NextUpWindow : MicaWindow
         WindowHelper.SetTopmost(this);
         CustomWindowChrome.CaptionHeight = 0;
 
+        int additionalMargin = 8; // additional margin to avoid text clipping
+        var upNextWidth = StringWidth.GetStringWidth(UpNextTextBlock.Text, fontSize: 12) + additionalMargin;
+        var titleWidth = StringWidth.GetStringWidth(title) + additionalMargin;
+        var artistWidth = StringWidth.GetStringWidth(artist) + additionalMargin;
+
+        double computedWidth = (titleWidth > artistWidth ? titleWidth : artistWidth) + 76 + upNextWidth;
+        Width = Math.Clamp(computedWidth, 200, 400); // floor + max width to prevent clipping or overly wide window
+        SongTitle.Text = title;
+        SongArtist.Text = artist;
+        UpdateThumbnail(thumbnail);
+        Show();
+
         if (SettingsManager.Current.NextUpAcrylicWindowEnabled)
         {
             WindowBlurHelper.EnableBlur(this);
@@ -37,29 +53,42 @@ public partial class NextUpWindow : MicaWindow
             WindowBlurHelper.DisableBlur(this);
         }
 
-        int additionalMargin = 8; // additional margin to avoid text clipping
-        var upNextWidth = StringWidth.GetStringWidth(UpNextTextBlock.Text) + additionalMargin;
-        var titleWidth = StringWidth.GetStringWidth(title) + additionalMargin;
-        var artistWidth = StringWidth.GetStringWidth(artist) + additionalMargin;
+        _mainWindow.OpenAnimation(this);
 
-        Width = titleWidth > artistWidth ? titleWidth + 76 + upNextWidth : artistWidth + 76 + upNextWidth;
-        if (Width > 400) Width = 400; // max width to prevent window from being too wide
-        SongTitle.Text = title;
-        SongArtist.Text = artist;
-        UpdateThumbnail(thumbnail);
-        Show();
+        _ = WaitAndCloseAsync(_cts.Token);
+    }
 
-        mainWindow.OpenAnimation(this);
-
-        async void wait()
+    private async Task WaitAndCloseAsync(CancellationToken token)
+    {
+        try
         {
-            await Task.Delay(SettingsManager.Current.NextUpDuration);
-            mainWindow.CloseAnimation(this);
-            await Task.Delay(MainWindow.getDuration());
+            await Task.Delay(Math.Max(0, SettingsManager.Current.NextUpDuration), token);
+            if (_isClosed || !IsLoaded || token.IsCancellationRequested)
+                return;
+
+            _mainWindow.CloseAnimation(this);
+            await Task.Delay(MainWindow.getDuration(), token);
+            if (_isClosed || !IsLoaded || token.IsCancellationRequested)
+                return;
+
             Close();
         }
+        catch (TaskCanceledException)
+        {
+            // window closed before auto-close timer elapsed
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed while auto-closing NextUpWindow");
+        }
+    }
 
-        wait();
+    protected override void OnClosed(EventArgs e)
+    {
+        _isClosed = true;
+        _cts.Cancel();
+        _cts.Dispose();
+        base.OnClosed(e);
     }
 
     public void UpdateThumbnail(BitmapImage? thumbnail)

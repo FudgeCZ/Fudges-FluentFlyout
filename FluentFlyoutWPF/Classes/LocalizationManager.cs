@@ -86,7 +86,9 @@ public static class LocalizationManager
         LanguageCode = languageCode;
 
         // get current localization
-        var dictionaries = App.Current.Resources.MergedDictionaries;
+        var app = Application.Current;
+        if (app == null) return;
+        var dictionaries = app.Resources.MergedDictionaries;
 
         // remove all localization dictionaries except the default one (en-US)
         foreach (var dictionary in dictionaries.ToList())
@@ -107,55 +109,61 @@ public static class LocalizationManager
         ApplyFontFamily(culture);
 
         // if English, the default (en-US) is already loaded, so no need to add another dictionary
-        if (languageCode == "en") return;
-
-        // find the localization file path based on the first two letters of the language code
-        string? localizationDictPath = $"Resources/Localization/Dictionary-{culture}.xaml";
-
-        var uri = new Uri(localizationDictPath, UriKind.Relative);
-
-        try
+        if (languageCode != "en")
         {
-            var resourceDict = new ResourceDictionary() { Source = uri };
-            dictionaries.Add(resourceDict);
-        }
-        catch (Exception)
-        {
-            // localization file not found, try simplified language code instead
+            // find the localization file path based on the first two letters of the language code
+            string? localizationDictPath = $"Resources/Localization/Dictionary-{culture}.xaml";
+
+            var uri = new Uri(localizationDictPath, UriKind.Relative);
 
             try
             {
-                localizationDictPath = $"Resources/Localization/Dictionary-{languageCode}.xaml";
-                uri = new Uri(localizationDictPath, UriKind.Relative);
-
                 var resourceDict = new ResourceDictionary() { Source = uri };
                 dictionaries.Add(resourceDict);
             }
-            catch
+            catch (Exception)
             {
-                // do nothing and keep the default (en-US)
-                Logger.Warn("Localization file not found for language: " + culture);
+                // localization file not found, try simplified language code instead
+
+                try
+                {
+                    localizationDictPath = $"Resources/Localization/Dictionary-{languageCode}.xaml";
+                    uri = new Uri(localizationDictPath, UriKind.Relative);
+
+                    var resourceDict = new ResourceDictionary() { Source = uri };
+                    dictionaries.Add(resourceDict);
+                }
+                catch
+                {
+                    // do nothing and keep the default (en-US)
+                    Logger.Warn("Localization file not found for language: " + culture);
+                }
             }
         }
 
         //Calculate the Lock Key Flyout text's Max Lenght
         List<double> Lengths = new List<double>();
 
-        Lengths.Add(StringWidth.GetStringWidth(Application.Current.TryFindResource("LockWindow_InsertPressed").ToString() ?? string.Empty));
+        Lengths.Add(StringWidth.GetStringWidth(app.TryFindResource("LockWindow_InsertPressed")?.ToString() ?? string.Empty));
 
-        var On = Application.Current.TryFindResource("LockWindow_LockOn")?.ToString() ?? string.Empty;
-        var Off = Application.Current.TryFindResource("LockWindow_LockOff")?.ToString() ?? string.Empty;
+        var On = app.TryFindResource("LockWindow_LockOn")?.ToString() ?? string.Empty;
+        var Off = app.TryFindResource("LockWindow_LockOff")?.ToString() ?? string.Empty;
         var OnOffMax = On.Length >= Off.Length ? On + " " : Off + " ";
 
-        Lengths.Add(StringWidth.GetStringWidth(OnOffMax + Application.Current.TryFindResource("LockWindow_CapsLock").ToString() ?? string.Empty));
-        Lengths.Add(StringWidth.GetStringWidth(OnOffMax + Application.Current.TryFindResource("LockWindow_NumLock").ToString() ?? string.Empty));
-        Lengths.Add(StringWidth.GetStringWidth(OnOffMax + Application.Current.TryFindResource("LockWindow_ScrollLock").ToString() ?? string.Empty));
+        Lengths.Add(StringWidth.GetStringWidth(OnOffMax + (app.TryFindResource("LockWindow_CapsLock")?.ToString() ?? string.Empty)));
+        Lengths.Add(StringWidth.GetStringWidth(OnOffMax + (app.TryFindResource("LockWindow_NumLock")?.ToString() ?? string.Empty)));
+        Lengths.Add(StringWidth.GetStringWidth(OnOffMax + (app.TryFindResource("LockWindow_ScrollLock")?.ToString() ?? string.Empty)));
 
         maxLength = Lengths.Max() + 8; // additional margin to avoid text clipping
 
         // set minimum just in case if resources weren't loaded
         if (maxLength < 20)
             maxLength = 115; // 160 (default width) - 45 (estimated padding)
+
+        foreach (var profile in SettingsManager.Current.MonitorProfiles)
+        {
+            profile.NotifyGlobalAppearanceChanged();
+        }
     }
 
     private static void ApplyFlowDirection(string languageCode)

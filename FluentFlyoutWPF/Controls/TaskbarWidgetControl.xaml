@@ -85,7 +85,7 @@
                             </TextBlock.Style>
                         </TextBlock>
 
-                        <StackPanel Name="ControlsStackPanel" Orientation="Horizontal" VerticalAlignment="Center" Width="Auto" Visibility="Collapsed">
+                        <StackPanel Name="ControlsStackPanel" Orientation="Horizontal" VerticalAlignment="Center" Width="Auto">
                             <StackPanel.Style>
                                 <Style TargetType="StackPanel">
                                     <Setter Property="Visibility" Value="Collapsed" />

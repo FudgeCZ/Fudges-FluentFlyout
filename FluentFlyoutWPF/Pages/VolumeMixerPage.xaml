@@ -6,37 +6,17 @@
       xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
       xmlns:controls="clr-namespace:MicaWPF.Controls;assembly=MicaWPF"
       xmlns:viewModels="clr-namespace:FluentFlyoutWPF.ViewModels"
-      xmlns:converters="clr-namespace:FluentFlyoutWPF.Classes.Converters"
       xmlns:fluentflyoutcontrols="clr-namespace:FluentFlyout.Controls"
       mc:Ignorable="d"
       d:DesignHeight="800" d:DesignWidth="800"
-      Title="VolumeFlyoutPage"
+      Title="VolumeMixerPage"
       d:DataContext="{d:DesignInstance viewModels:UserSettings}"
       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
       d:Background="White">
 
-    <Page.Resources>
-        <converters:BoolToVisibleCollapsedConverter x:Key="BoolToCollapsedVisibleConverter" TrueValue="Collapsed" FalseValue="Visible" />
-        <converters:BoolToFullHalfOpacityConverter x:Key="BoolToFullHalfOpacityConverter" />
-    </Page.Resources>
-
     <StackPanel MaxWidth="1000" Margin="16">
         <TextBlock Text="{DynamicResource VolumeFlyoutTitle}" FontSize="24" FontWeight="SemiBold" FontFamily="Segoe UI Variable" Margin="0,0,0,20" />
         <Grid>
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-            </Grid.RowDefinitions>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,24">
                 <Border CornerRadius="10" ClipToBounds="True" Width="164" Height="98">
                     <Border.Background>
@@ -86,7 +66,7 @@
                 <ui:ToggleSwitch IsChecked="{Binding VolumeControlAboveMediaFlyout, Mode=TwoWay}" />
             </ui:CardControl>
 
-            <ui:CardControl x:Name="VolumeFlyoutStayDurationTitleCard" Tag="Indexable" Grid.Row="3" Icon="{ui:SymbolIcon Timer24}" Margin="0,0,0,12">
+            <ui:CardControl x:Name="VolumeFlyoutStayDurationTitleCard" Tag="Indexable" Icon="{ui:SymbolIcon Timer24}" Margin="0,0,0,12">
                 <ui:CardControl.Header>
                     <StackPanel Orientation="Vertical">
                         <TextBlock Text="{DynamicResource VolumeFlyoutStayDurationTitle}" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />

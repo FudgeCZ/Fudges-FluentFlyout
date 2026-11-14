@@ -15,7 +15,6 @@ public partial class TaskbarWidgetPage : Page
     {
         InitializeComponent();
         DataContext = SettingsManager.Current;
-        Loaded += (_, _) => TaskbarWidgetSelectedMonitorTitleCard.RenderMonitors();
     }
 
     private void AppFiltering_Click(object sender, System.Windows.RoutedEventArgs e)

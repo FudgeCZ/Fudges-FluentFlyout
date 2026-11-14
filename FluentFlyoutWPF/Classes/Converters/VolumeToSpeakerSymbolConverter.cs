@@ -11,12 +11,21 @@ public class VolumeToSpeakerSymbolConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
     {
-        if (value is float volume)
+        double? volume = value switch
         {
-            return volume switch
+            float f => f,
+            double d => d,
+            int i => i,
+            decimal m => (double)m,
+            _ => null
+        };
+
+        if (volume.HasValue)
+        {
+            return volume.Value switch
             {
-                < 0.10f => SymbolRegular.Speaker028,
-                < 0.50f => SymbolRegular.Speaker128,
+                < 0.10 => SymbolRegular.Speaker028,
+                < 0.50 => SymbolRegular.Speaker128,
                 _ => SymbolRegular.Speaker228
             };
         }

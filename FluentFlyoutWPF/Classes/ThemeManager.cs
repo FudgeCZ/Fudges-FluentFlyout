@@ -30,17 +30,28 @@ internal static class ThemeManager
     }
 
     /// <summary>
+    /// Applies the specified theme and updates active windows without saving settings directly.
+    /// </summary>
+    internal static void ApplyThemeForSetting(int theme)
+    {
+        ApplyTheme(theme);
+
+        if (SettingsManager.Current.MediaFlyoutAcrylicWindowEnabled && Application.Current?.MainWindow is { } mainWindow)
+        {
+            WindowBlurHelper.EnableBlur(mainWindow);
+        }
+        UpdateTaskbarWidget();
+    }
+
+    /// <summary>
     /// Applies the specified theme and saves it to the application settings.
     /// </summary>
     /// <inheritdoc cref="ApplyTheme"/>
     public static void ApplyAndSaveTheme(int theme)
     {
-        ApplyTheme(theme);
+        ApplyThemeForSetting(theme);
         SettingsManager.Current.AppTheme = theme;
         SettingsManager.SaveSettings();
-
-        if (SettingsManager.Current.MediaFlyoutAcrylicWindowEnabled) { WindowBlurHelper.EnableBlur(Application.Current.MainWindow); }
-        UpdateTaskbarWidget();
     }
 
     /// <summary>
@@ -78,7 +89,10 @@ internal static class ThemeManager
     /// <remarks>This function was not necessary because the theme was managed by MicaWPF.</remarks>
     private static void WatchThemeChanges()
     {
-        SystemThemeWatcher.Watch(Application.Current.MainWindow/*, WindowBackdropType.Mica, true*/);
+        if (Application.Current?.MainWindow is { } mainWindow)
+        {
+            SystemThemeWatcher.Watch(mainWindow/*, WindowBackdropType.Mica, true*/);
+        }
     }
 
     /// <summary>
@@ -88,9 +102,9 @@ internal static class ThemeManager
     private static void UnWatchThemeChanges()
     {
         // check if window is loaded
-        if (Application.Current.MainWindow.IsLoaded == false) return;
+        if (Application.Current?.MainWindow is not { IsLoaded: true } mainWindow) return;
 
-        SystemThemeWatcher.UnWatch(Application.Current.MainWindow);
+        SystemThemeWatcher.UnWatch(mainWindow);
     }
 
     /// <summary>
@@ -98,9 +112,9 @@ internal static class ThemeManager
     /// </summary>
     public static void UpdateTrayIcon()
     {
-        Application.Current.Dispatcher.Invoke(() =>
+        Application.Current?.Dispatcher?.Invoke(() =>
         {
-            if (Application.Current.MainWindow.FindName("nIcon") is NotifyIcon nIcon)
+            if (Application.Current?.MainWindow?.FindName("nIcon") is NotifyIcon nIcon)
             {
                 if (SettingsManager.Current.NIconSymbol == true)
                 {
@@ -124,9 +138,9 @@ internal static class ThemeManager
     /// </summary>
     public static void UpdateTaskbarWidget()
     {
-        Application.Current.Dispatcher.Invoke(() =>
+        Application.Current?.Dispatcher?.Invoke(() =>
         {
-            if (Application.Current.MainWindow is not MainWindow mainWindow)
+            if (Application.Current?.MainWindow is not MainWindow mainWindow)
                 return;
 
             foreach (var tw in mainWindow.taskbarWindows)

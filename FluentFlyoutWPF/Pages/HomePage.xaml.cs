@@ -36,15 +36,39 @@ public partial class HomePage : Page
             VersionTextBlock.Text = "debug version";
         }
 
+        Loaded += HomePage_Loaded;
+        Unloaded += HomePage_Unloaded;
         UpdateLastCheckedText();
+    }
+
+    private void HomePage_Loaded(object sender, RoutedEventArgs e)
+    {
+        UpdateState.Current.PropertyChanged -= UpdateState_PropertyChanged;
+        UpdateState.Current.PropertyChanged += UpdateState_PropertyChanged;
+        UpdateNowButton.IsEnabled = !_updating;
+        UpdateLastCheckedText();
+    }
+
+    private void HomePage_Unloaded(object sender, RoutedEventArgs e)
+    {
+        UpdateState.Current.PropertyChanged -= UpdateState_PropertyChanged;
+    }
+
+    private void UpdateState_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(UpdateState.LastUpdateCheck) or nameof(UpdateState.LastCheckedText))
+        {
+            Dispatcher.BeginInvoke(UpdateLastCheckedText);
+        }
     }
 
     private void UpdateLastCheckedText()
     {
         if (UpdateState.Current.LastUpdateCheck != default)
         {
+            var format = Application.Current?.TryFindResource("LastChecked")?.ToString() ?? "Last checked: {0}";
             LastCheckedText.Text = string.Format(
-                Application.Current.FindResource("LastChecked")?.ToString(),
+                format,
                 UpdateState.Current.LastCheckedText);
         }
         else
@@ -58,7 +82,7 @@ public partial class HomePage : Page
         Notifications.OpenChangelogInBrowser();
     }
 
-    private bool _updating;
+    private static bool _updating;
 
     /// <summary>
     /// Custom updater: downloads the release asset, then hands over to a detached
@@ -96,7 +120,7 @@ public partial class HomePage : Page
             UpdateStatusText.Text = "Restarting to apply the update…";
             if (UpdateInstallerService.LaunchStagedUpdate(zipPath))
             {
-                Application.Current.Shutdown();
+                Application.Current?.Shutdown();
                 return;
             }
 
@@ -141,7 +165,7 @@ public partial class HomePage : Page
     {
         try
         {
-            UpdateStatusText.Text = Application.Current.FindResource("CheckingForUpdates")?.ToString();
+            UpdateStatusText.Text = Application.Current?.TryFindResource("CheckingForUpdates")?.ToString() ?? "Checking for updates...";
 
             var result = await UpdateCheckerService.CheckForUpdatesAsync(SettingsManager.Current.LastKnownVersion);
 
@@ -161,15 +185,8 @@ public partial class HomePage : Page
                     try
                     {
                         await Task.Delay(500); // slight delay for better UX
-
-                        if (result.IsUpdateAvailable)
-                        {
-                            UpdateStatusText.Text = Application.Current.FindResource("UpdateAvailableNotificationTitle")?.ToString();
-                        }
-                        else
-                        {
-                            UpdateStatusText.Text = Application.Current.FindResource("UpToDate")?.ToString();
-                        }
+                        // Clear local Text value so the XAML Style / DataTrigger (UpToDate / UpdateAvailable) stays active
+                        UpdateStatusText.ClearValue(System.Windows.Controls.TextBlock.TextProperty);
                     }
                     catch (Exception ex)
                     {
@@ -179,7 +196,7 @@ public partial class HomePage : Page
             }
             else
             {
-                UpdateStatusText.Text = Application.Current.FindResource("UpToDate")?.ToString();
+                UpdateStatusText.ClearValue(System.Windows.Controls.TextBlock.TextProperty);
             }
         }
         catch (Exception ex)

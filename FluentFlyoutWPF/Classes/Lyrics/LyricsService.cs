@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 using FluentFlyout.Classes.Settings;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -40,10 +41,14 @@ public sealed class LyricsService
 
     private readonly HttpClient _http;
     private readonly SemaphoreSlim _fetchLock = new(1, 1);
-    private readonly Dictionary<string, LyricsResult?> _memoryCache = new();
+    private readonly ConcurrentDictionary<string, LyricsResult?> _memoryCache = new();
+    private readonly object _stateLock = new();
 
-    private string _requestKey = "";
-    private string _inFlightKey = "";
+    private long _requestSeq;
+    private string _activeFetchId = "";
+    private Task<LyricsResult?>? _activeFetchTask;
+    private bool _isFetching;
+    private (string Artist, string Title, TimeSpan Duration)? _currentTrack;
 
     /// <summary>Track identity of <see cref="Current"/> ("artist|title|seconds"), or "" when idle.</summary>
     public string CurrentKey { get; private set; } = "";
@@ -56,9 +61,14 @@ public sealed class LyricsService
     {
         if (IsTrackDisabled(artist, title))
             return LyricsTrackState.Missing;
-        if (CurrentKey != MakeKey(artist, title, duration))
-            return LyricsTrackState.Unknown;
-        return Current != null ? LyricsTrackState.Found : LyricsTrackState.Missing;
+        lock (_stateLock)
+        {
+            if (CurrentKey != MakeKey(artist, title, duration))
+                return LyricsTrackState.Unknown;
+            if (Current != null)
+                return LyricsTrackState.Found;
+            return _isFetching ? LyricsTrackState.Unknown : LyricsTrackState.Missing;
+        }
     }
 
     /// <summary>Lyrics for the current track, or null when none found / nothing playing.</summary>
@@ -80,6 +90,12 @@ public sealed class LyricsService
         _http.Timeout = TimeSpan.FromSeconds(8);
     }
 
+    private bool IsSuperseded(long seq)
+    {
+        lock (_stateLock)
+            return _requestSeq != seq;
+    }
+
     /// <summary>
     /// Fetches lyrics for a track (main provider unless <paramref name="providerOverride"/> is given).
     /// Safe to call repeatedly; results only apply if this track is still current.
@@ -89,9 +105,16 @@ public sealed class LyricsService
         if (IsTrackDisabled(artist, title))
         {
             string disabledKey = MakeKey(artist, title, duration);
-            _requestKey = disabledKey;
-            CurrentKey = disabledKey;
-            Current = null;
+            lock (_stateLock)
+            {
+                _requestSeq++;
+                _activeFetchId = "";
+                _activeFetchTask = null;
+                _isFetching = false;
+                CurrentKey = disabledKey;
+                _currentTrack = (artist, title, duration);
+                Current = null;
+            }
             NotifyChanged();
             return;
         }
@@ -99,56 +122,87 @@ public sealed class LyricsService
         int provider = providerOverride ?? SettingsManager.Current.LyricsProvider;
         string key = MakeKey(artist, title, duration);
 
-        // same key but an explicit provider switch must still refetch
-        if (providerOverride == null && key == CurrentKey && Current != null)
-            return;
-
-        string cacheKey = $"{key}|p{provider}";
-        _requestKey = cacheKey;
-        CurrentKey = key;
-        Current = null; // stale; no notify — the control drops the old lyrics itself,
-                        // and a terminal miss notifies when the fetch completes
-
-        LyricsResult? result;
-        if (_memoryCache.TryGetValue(cacheKey, out var cached))
+        long seq;
+        lock (_stateLock)
         {
-            result = cached;
-        }
-        else
-        {
-            result = await FetchLockedAsync(cacheKey, cacheKey, artist, title, duration, provider);
+            // same key but an explicit provider switch must still refetch
+            if (providerOverride == null && key == CurrentKey && Current != null)
+                return;
+
+            seq = ++_requestSeq;
+            _activeFetchId = "";
+            _activeFetchTask = null;
+            _isFetching = true;
+            CurrentKey = key;
+            _currentTrack = (artist, title, duration);
+            Current = null; // stale; no notify — the control drops the old lyrics itself,
+                            // and a terminal miss notifies when the fetch completes
         }
 
-        // main provider found nothing (and the user didn't pick one manually) —
-        // fall through the remaining providers before giving up
-        if (result == null && providerOverride == null)
+        try
         {
-            foreach (var alt in LyricsProviders.All())
+            string cacheKey = $"{key}|p{provider}";
+            string winningCacheKey = cacheKey;
+            LyricsResult? result;
+            if (_memoryCache.TryGetValue(cacheKey, out var cached) && cached != null)
             {
-                if (alt == provider)
-                    continue;
+                result = cached;
+            }
+            else
+            {
+                result = await FetchLockedAsync(seq, cacheKey, artist, title, duration, provider);
+            }
 
-                string altKey = $"{key}|p{alt}";
-                if (_memoryCache.TryGetValue(altKey, out var altCached) && altCached != null)
+            // main provider found nothing (and the user didn't pick one manually) —
+            // fall through the remaining providers before giving up
+            if (result == null && providerOverride == null)
+            {
+                foreach (var alt in LyricsProviders.All())
                 {
-                    result = altCached;
-                    break;
-                }
+                    if (alt == provider)
+                        continue;
+                    if (IsSuperseded(seq))
+                        return;
 
-                Logger.Info($"No lyrics from {LyricsProviders.Name(provider)}, trying {LyricsProviders.Name(alt)}");
-                result = await FetchLockedAsync(cacheKey, altKey, artist, title, duration, alt);
-                if (result != null)
-                    break;
+                    string altKey = $"{key}|p{alt}";
+                    if (_memoryCache.TryGetValue(altKey, out var altCached) && altCached != null)
+                    {
+                        result = altCached;
+                        winningCacheKey = altKey;
+                        break;
+                    }
+
+                    Logger.Info($"No lyrics from {LyricsProviders.Name(provider)}, trying {LyricsProviders.Name(alt)}");
+                    result = await FetchLockedAsync(seq, altKey, artist, title, duration, alt);
+                    if (result != null)
+                    {
+                        winningCacheKey = altKey;
+                        break;
+                    }
+                }
+            }
+
+            lock (_stateLock)
+            {
+                if (_requestSeq != seq)
+                    return; // a newer request superseded this one
+
+                Current = result;
+                _isFetching = false;
+            }
+
+            if (result != null)
+                _memoryCache[winningCacheKey] = result; // misses are NOT cached — retried on next play
+            NotifyChanged();
+        }
+        finally
+        {
+            lock (_stateLock)
+            {
+                if (_requestSeq == seq)
+                    _isFetching = false;
             }
         }
-
-        if (_requestKey != cacheKey)
-            return; // a newer request superseded this one
-
-        Current = result;
-        if (result != null)
-            _memoryCache[cacheKey] = result; // misses are NOT cached — retried on next play
-        NotifyChanged();
     }
 
     /// <summary>
@@ -161,16 +215,37 @@ public sealed class LyricsService
     /// <summary>Clears the current lyrics and refetches (provider switch, cache invalidation).</summary>
     public void RefreshCurrentTrack()
     {
-        string key = CurrentKey;
-        if (key.Length == 0)
-            return;
+        string artist, title;
+        TimeSpan duration;
+        lock (_stateLock)
+        {
+            if (_currentTrack is { } t)
+            {
+                artist = t.Artist;
+                title = t.Title;
+                duration = t.Duration;
+            }
+            else
+            {
+                string key = CurrentKey;
+                if (key.Length == 0)
+                    return;
 
-        _inFlightKey = "";
-        var parts = key.Split('|');
-        if (parts.Length != 3)
-            return;
+                var parts = SplitEscapedKey(key);
+                if (parts.Count != 3 ||
+                    !double.TryParse(parts[2], System.Globalization.CultureInfo.InvariantCulture, out double secs))
+                    return;
 
-        _ = FetchSmartAsync(parts[0], parts[1], TimeSpan.FromSeconds(double.Parse(parts[2], System.Globalization.CultureInfo.InvariantCulture)));
+                artist = parts[0];
+                title = parts[1];
+                duration = TimeSpan.FromSeconds(secs);
+            }
+
+            _activeFetchId = "";
+            _activeFetchTask = null;
+        }
+
+        _ = FetchWithMemoryAsync(artist, title, duration, SettingsManager.Current.LyricsProvider, ignoreWinner: true);
     }
 
     /// <summary>
@@ -178,27 +253,49 @@ public sealed class LyricsService
     /// won for this track is tried first, then the main provider, then the rest.
     /// Always terminates with exactly one LyricsChanged notification.
     /// </summary>
-    public async Task<LyricsResult?> FetchWithMemoryAsync(string artist, string title, TimeSpan duration, int mainProvider)
+    public Task<LyricsResult?> FetchWithMemoryAsync(
+        string artist, string title, TimeSpan duration, int mainProvider, bool ignoreWinner = false)
     {
         string key = MakeKey(artist, title, duration);
-        string inFlightId = $"{key}|p{mainProvider}";
-        if (_inFlightKey == inFlightId)
-            return null; // another monitor already started this exact fetch
+        string inFlightId = $"{key}|p{mainProvider}|{(ignoreWinner ? 1 : 0)}";
 
-        _inFlightKey = inFlightId;
-        _requestKey = key;
-        CurrentKey = key;
-        Current = null;
+        lock (_stateLock)
+        {
+            if (_activeFetchTask != null && !_activeFetchTask.IsCompleted && _activeFetchId == inFlightId)
+                return _activeFetchTask; // share the in-flight task with other monitors
 
+            long seq = ++_requestSeq;
+            _activeFetchId = inFlightId;
+            _isFetching = true;
+            CurrentKey = key;
+            _currentTrack = (artist, title, duration);
+            Current = null;
+
+            var task = RunFetchWithMemoryAsync(seq, inFlightId, key, artist, title, duration, mainProvider, ignoreWinner);
+            _activeFetchTask = task;
+            return task;
+        }
+    }
+
+    private async Task<LyricsResult?> RunFetchWithMemoryAsync(
+        long seq, string inFlightId, string key, string artist, string title, TimeSpan duration, int mainProvider, bool ignoreWinner)
+    {
         try
         {
             if (IsTrackDisabled(artist, title))
             {
+                lock (_stateLock)
+                {
+                    if (_requestSeq != seq)
+                        return null;
+                    Current = null;
+                    _isFetching = false;
+                }
                 NotifyChanged();
                 return null;
             }
 
-            int? winner = GetWinner(artist, title, duration);
+            int? winner = ignoreWinner ? null : GetWinner(artist, title, duration);
             var order = new List<int> { mainProvider };
             order.AddRange(LyricsProviders.All().Where(p => p != mainProvider));
             if (winner.HasValue && winner.Value != mainProvider)
@@ -209,36 +306,57 @@ public sealed class LyricsService
 
             foreach (int provider in order)
             {
-                var result = await TryProviderCachedAsync(key, artist, title, duration, provider);
-                if (_requestKey != key)
+                if (IsSuperseded(seq))
+                    return null;
+
+                var result = await TryProviderCachedAsync(seq, key, artist, title, duration, provider);
+                if (IsSuperseded(seq))
                     return null; // superseded by a newer track
 
                 if (result != null)
                 {
                     if (winner != provider)
                         SetWinner(artist, title, duration, provider);
-                    Current = result;
+                    lock (_stateLock)
+                    {
+                        if (_requestSeq != seq)
+                            return null;
+                        Current = result;
+                        _isFetching = false;
+                    }
                     NotifyChanged();
                     return result;
                 }
             }
 
-            if (_requestKey == key)
+            lock (_stateLock)
             {
+                if (_requestSeq != seq)
+                    return null;
                 Current = null;
-                NotifyChanged(); // terminal miss — the widget must hide
+                _isFetching = false;
             }
+            NotifyChanged(); // terminal miss — the widget must hide
             return null;
         }
         finally
         {
-            if (_inFlightKey == inFlightId)
-                _inFlightKey = "";
+            lock (_stateLock)
+            {
+                if (_requestSeq == seq)
+                    _isFetching = false;
+                if (_activeFetchId == inFlightId)
+                {
+                    _activeFetchId = "";
+                    _activeFetchTask = null;
+                }
+            }
         }
     }
 
     /// <summary>Per-provider lookup: memory cache, then disk cache, then network.</summary>
-    private async Task<LyricsResult?> TryProviderCachedAsync(string key, string artist, string title, TimeSpan duration, int provider)
+    private async Task<LyricsResult?> TryProviderCachedAsync(
+        long seq, string key, string artist, string title, TimeSpan duration, int provider)
     {
         string cacheKey = $"{key}|p{provider}";
 
@@ -252,7 +370,7 @@ public sealed class LyricsService
             return disk;
         }
 
-        var fetched = await FetchLockedAsync(key, cacheKey, artist, title, duration, provider);
+        var fetched = await FetchLockedAsync(seq, cacheKey, artist, title, duration, provider);
         if (fetched != null)
             _memoryCache[cacheKey] = fetched;
         return fetched;
@@ -315,25 +433,42 @@ public sealed class LyricsService
         }
     }
 
-    private async Task<LyricsResult?> FetchLockedAsync(string mainCacheKey, string providerCacheKey, string artist, string title, TimeSpan duration, int provider)
+    private async Task<LyricsResult?> FetchLockedAsync(long seq, string providerCacheKey, string artist, string title, TimeSpan duration, int provider)
     {
+        if (IsSuperseded(seq))
+            return null;
+
+        var disk = LoadFromDisk(providerCacheKey);
+        if (disk != null)
+            return disk;
+
+        string cleanTitle = LrcParser.CleanQueryTitle(title);
+
+        // Fetch YTM bridge state before acquiring _fetchLock so the bridge HTTP call doesn't block other fetches
+        Classes.Services.YtmBridgeService.BridgeSong? bridgeSong = null;
+        if (provider == LyricsProviders.YouTubeMusic)
+        {
+            bridgeSong = await Classes.Services.YtmBridgeService.Instance.GetSongAsync();
+            if (IsSuperseded(seq))
+                return null;
+        }
+
         await _fetchLock.WaitAsync();
         try
         {
-            if (_requestKey != mainCacheKey)
+            if (IsSuperseded(seq))
                 return null; // superseded
 
-            var disk = LoadFromDisk(providerCacheKey);
+            disk = LoadFromDisk(providerCacheKey);
             if (disk != null)
                 return disk;
 
-            string cleanTitle = LrcParser.CleanQueryTitle(title);
             Logger.Info($"Fetching lyrics ({LyricsProviders.Name(provider)}): {artist} - {cleanTitle}");
 
             LyricsResult? result = provider switch
             {
                 LyricsProviders.Musixmatch => await MusixmatchFetchAsync(artist, cleanTitle, duration),
-                LyricsProviders.YouTubeMusic => await YouTubeMusicFetchAsync(artist, cleanTitle),
+                LyricsProviders.YouTubeMusic => await YouTubeMusicFetchAsync(artist, cleanTitle, bridgeSong),
                 _ => await LrcLibFetchAsync(artist, cleanTitle, duration),
             };
 
@@ -447,7 +582,7 @@ public sealed class LyricsService
                        $"&q_artist={Uri.EscapeDataString(artist)}&q_track={Uri.EscapeDataString(title)}";
 
         // synced lyrics first
-        var subtitle = await MusixmatchJsonAsync("matcher.subtitle.get", query + "&subtitle_format=lrc");
+        using var subtitle = await MusixmatchJsonAsync("matcher.subtitle.get", query + "&subtitle_format=lrc");
         if (subtitle != null &&
             ExtractMusixmatch(subtitle, "subtitle") is { } subBody &&
             LrcParser.Parse(subBody) is { Count: > 0 } subLines)
@@ -456,7 +591,7 @@ public sealed class LyricsService
         }
 
         // fallback: plain lyrics
-        var lyrics = await MusixmatchJsonAsync("matcher.lyrics.get", query);
+        using var lyrics = await MusixmatchJsonAsync("matcher.lyrics.get", query);
         if (lyrics != null &&
             ExtractMusixmatch(lyrics, "lyrics") is { } body &&
             body.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) is { Length: > 0 } arr)
@@ -504,7 +639,7 @@ public sealed class LyricsService
             using var resp = await _http.GetAsync(MusixmatchBase + method + "?" + query);
             if (!resp.IsSuccessStatusCode)
                 return null;
-            var stream = await resp.Content.ReadAsStreamAsync();
+            await using var stream = await resp.Content.ReadAsStreamAsync();
             return await JsonDocument.ParseAsync(stream);
         }
         catch (Exception ex)
@@ -599,7 +734,21 @@ public sealed class LyricsService
         return null;
     }
 
-    private async Task<LyricsResult?> YouTubeMusicFetchAsync(string artist, string title)
+    private static string NormalizeForMatch(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return "";
+        var sb = new StringBuilder(text.Length);
+        foreach (char c in text)
+        {
+            if (char.IsLetterOrDigit(c))
+                sb.Append(char.ToLowerInvariant(c));
+        }
+        return sb.ToString();
+    }
+
+    private async Task<LyricsResult?> YouTubeMusicFetchAsync(
+        string artist, string title, Classes.Services.YtmBridgeService.BridgeSong? bridge)
     {
         try
         {
@@ -607,12 +756,21 @@ public sealed class LyricsService
             //    otherwise search. Skipping search also avoids landing on the official
             //    music video (OMV), which has no lyrics tab; only song (ATV) tracks do.
             string? videoId = null;
-            var bridge = await Classes.Services.YtmBridgeService.Instance.GetSongAsync();
-            if (bridge != null && bridge.VideoId.Length > 0 &&
-                bridge.Title.Replace(" ", "").ToLowerInvariant()
-                    .Contains(title.Replace(" ", "").ToLowerInvariant(), StringComparison.Ordinal))
+            if (bridge != null && bridge.VideoId.Length > 0)
             {
-                videoId = bridge.VideoId;
+                string normBridgeTitle = NormalizeForMatch(LrcParser.CleanQueryTitle(bridge.Title));
+                string normTitle = NormalizeForMatch(title);
+                if (normBridgeTitle.Length > 0 && string.Equals(normBridgeTitle, normTitle, StringComparison.Ordinal))
+                {
+                    string normBridgeArtist = NormalizeForMatch(bridge.Artist);
+                    string normArtist = NormalizeForMatch(artist);
+                    if (normBridgeArtist.Length == 0 || normArtist.Length == 0 ||
+                        normBridgeArtist.Contains(normArtist, StringComparison.Ordinal) ||
+                        normArtist.Contains(normBridgeArtist, StringComparison.Ordinal))
+                    {
+                        videoId = bridge.VideoId;
+                    }
+                }
             }
 
             if (videoId == null)
@@ -876,12 +1034,22 @@ public sealed class LyricsService
             Logger.Warn(ex, "Failed to clear lyrics cache");
         }
         Instance._memoryCache.Clear();
+        lock (Instance._stateLock)
+        {
+            Instance._requestSeq++;
+            Instance._activeFetchId = "";
+            Instance._activeFetchTask = null;
+            Instance._isFetching = false;
+            Instance.Current = null;
+            Instance.CurrentKey = "";
+            Instance._currentTrack = null;
+        }
         lock (Instance._winnersLock)
         {
             Instance._winners.Clear();
         }
         try { File.Delete(WinnersPath); } catch { /* best effort */ }
-        lock (Instance._offsets)
+        lock (Instance._offsetsLock)
         {
             Instance._offsets.Clear();
         }
@@ -897,7 +1065,7 @@ public sealed class LyricsService
     private readonly object _disabledLock = new();
 
     private static string MakeTrackId(string? artist, string? title) =>
-        $"{(artist ?? "").Trim().ToLowerInvariant()}|{(title ?? "").Trim().ToLowerInvariant()}";
+        $"{EscapeKeyPart((artist ?? "").Trim().ToLowerInvariant())}|{EscapeKeyPart((title ?? "").Trim().ToLowerInvariant())}";
 
     /// <summary>Whether the user has disabled lyrics for this track.</summary>
     public bool IsTrackDisabled(string? artist, string? title)
@@ -944,24 +1112,39 @@ public sealed class LyricsService
         if (!changed)
             return;
 
-        if (disabled)
+        bool matchesCurrent = false;
+        lock (_stateLock)
         {
-            var parts = CurrentKey.Split('|');
-            if (parts.Length >= 2 && MakeTrackId(parts[0], parts[1]) == id)
+            if (_currentTrack is { } t)
             {
-                _requestKey = "";
-                Current = null;
-                NotifyChanged();
+                matchesCurrent = MakeTrackId(t.Artist, t.Title) == id;
+            }
+            else if (CurrentKey.Length > 0)
+            {
+                var parts = SplitEscapedKey(CurrentKey);
+                matchesCurrent = parts.Count >= 2 && MakeTrackId(parts[0], parts[1]) == id;
+            }
+
+            if (matchesCurrent)
+            {
+                if (disabled)
+                {
+                    _requestSeq++;
+                    _activeFetchId = "";
+                    _activeFetchTask = null;
+                    _isFetching = false;
+                    Current = null;
+                }
+                else
+                {
+                    CurrentKey = "";
+                    _currentTrack = null;
+                }
             }
         }
-        else
-        {
-            var parts = CurrentKey.Split('|');
-            if (parts.Length >= 2 && MakeTrackId(parts[0], parts[1]) == id)
-            {
-                CurrentKey = "";
-            }
-        }
+
+        if (disabled && matchesCurrent)
+            NotifyChanged();
 
         NotifyDisabledChanged();
     }
@@ -975,7 +1158,16 @@ public sealed class LyricsService
             _disabledTracks.Clear();
             try { File.Delete(DisabledPath); } catch { /* best effort */ }
         }
-        CurrentKey = "";
+        lock (_stateLock)
+        {
+            _requestSeq++;
+            _activeFetchId = "";
+            _activeFetchTask = null;
+            _isFetching = false;
+            Current = null;
+            CurrentKey = "";
+            _currentTrack = null;
+        }
         NotifyDisabledChanged();
     }
 
@@ -1078,8 +1270,43 @@ public sealed class LyricsService
         }
     }
 
+    private static string EscapeKeyPart(string? value) =>
+        (value ?? "").Replace("\\", "\\\\").Replace("|", "\\|");
+
+    private static List<string> SplitEscapedKey(string key)
+    {
+        var parts = new List<string>(3);
+        var sb = new StringBuilder();
+        bool escape = false;
+        foreach (char c in key)
+        {
+            if (escape)
+            {
+                sb.Append(c);
+                escape = false;
+            }
+            else if (c == '\\')
+            {
+                escape = true;
+            }
+            else if (c == '|')
+            {
+                parts.Add(sb.ToString());
+                sb.Clear();
+            }
+            else
+            {
+                sb.Append(c);
+            }
+        }
+        if (escape)
+            sb.Append('\\');
+        parts.Add(sb.ToString());
+        return parts;
+    }
+
     private static string MakeKey(string artist, string title, TimeSpan duration) =>
-        $"{artist}|{title}|{(int)duration.TotalSeconds}";
+        $"{EscapeKeyPart(artist)}|{EscapeKeyPart(title)}|{(int)duration.TotalSeconds}";
 
     private static string Sha1(string input) =>
         Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(input)));

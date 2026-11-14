@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 using FluentFlyout.Classes.Settings;
+using System.Collections.Concurrent;
+using System.Globalization;
 using System.Windows;
 using System.Windows.Media;
 
@@ -9,9 +11,8 @@ namespace FluentFlyout.Classes.Utils
 {
     internal static class StringWidth
     {
-        private static FontFamily? fontFamily;
-        private static string cachedFontFamily = string.Empty;
-        private static Dictionary<string, Typeface> _cachedTypefaces = new();
+        private const string DefaultFontFamily = "Segoe UI Variable, Microsoft YaHei UI, Yu Gothic UI, Malgun Gothic";
+        private static readonly ConcurrentDictionary<(string FontFamily, int FontWeight), Typeface> _cachedTypefaces = new();
 
         /// <summary>
         /// Gets the width of the specified string when rendered with the specified font weight.
@@ -19,20 +20,26 @@ namespace FluentFlyout.Classes.Utils
         /// <param name="text">Text to measure</param>
         /// <param name="fontWeight">Weight of the font. Defaults to 500 (Medium)</param>
         /// <param name="fontSize">Size of the font in device-independent units (pixels). Defaults to 14.</param>
+        /// <param name="pixelsPerDip">Pixels per device-independent pixel scale factor. Defaults to 1.0.</param>
         /// <returns>The width of the specified text, in device-independent units (pixels), including a small padding.</returns>
-        public static double GetStringWidth(string? text, int fontWeight = 500, int fontSize = 14)
+        public static double GetStringWidth(string? text, int fontWeight = 500, int fontSize = 14, double pixelsPerDip = 1.0)
         {
-            if (text == null) return 0;
+            if (string.IsNullOrEmpty(text) || fontSize <= 0) return 0;
+
+            if (pixelsPerDip <= 0 || double.IsNaN(pixelsPerDip) || double.IsInfinity(pixelsPerDip))
+            {
+                pixelsPerDip = 1.0;
+            }
 
             var formattedText = new FormattedText(
                 text,
-                System.Globalization.CultureInfo.CurrentCulture,
+                CultureInfo.CurrentUICulture,
                 FlowDirection.LeftToRight,
                 GetCurrentTypeface(fontWeight),
                 fontSize,
                 Brushes.Black,
                 null,
-                1);
+                pixelsPerDip);
 
             return formattedText.Width;
         }
@@ -40,29 +47,16 @@ namespace FluentFlyout.Classes.Utils
         // Returns the current Typeface based on the font family and weight, caching it for performance.
         private static Typeface GetCurrentTypeface(int fontWeight)
         {
-            string currentFontFamily = SettingsManager.Current.FontFamily ?? "Segoe UI Variable, Microsoft YaHei UI, Yu Gothic UI, Malgun Gothic";
+            string currentFontFamily = string.IsNullOrWhiteSpace(SettingsManager.Current.FontFamily)
+                ? DefaultFontFamily
+                : SettingsManager.Current.FontFamily;
+            int clampedWeight = Math.Clamp(fontWeight, 1, 999);
 
-            // determine if the font family has changed since the last call, and if so, update the cached font family
-            if (fontFamily == null || cachedFontFamily != currentFontFamily)
+            return _cachedTypefaces.GetOrAdd((currentFontFamily, clampedWeight), static key =>
             {
-                // get the current font family from user settings or use the default one
-                fontFamily = new FontFamily(currentFontFamily);
-                cachedFontFamily = currentFontFamily;
-            }
-
-            _cachedTypefaces.TryGetValue(currentFontFamily + fontWeight, out var cachedTypeface);
-
-            // if exists, return the cached typeface. Otherwise, create a new one and cache it.
-            if (cachedTypeface != null)
-            {
-                return cachedTypeface;
-            }
-            else
-            {
-                var newTypeface = new Typeface(fontFamily, new FontStyle(), fontWeight == 400 ? FontWeights.Normal : FontWeights.Medium, FontStretches.Normal);
-                _cachedTypefaces[currentFontFamily + fontWeight] = newTypeface;
-                return newTypeface;
-            }
+                var fontFamily = new FontFamily(key.FontFamily);
+                return new Typeface(fontFamily, FontStyles.Normal, FontWeight.FromOpenTypeWeight(key.FontWeight), FontStretches.Normal);
+            });
         }
     }
 }

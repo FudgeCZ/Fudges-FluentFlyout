@@ -20,11 +20,14 @@ public static class WindowBlurHelper
     /// <param name="blurBackgroundColor">Background color in BGR format (default: 0x202020)</param>
     public static void EnableBlur(Window window, uint blurOpacity = 175, uint blurBackgroundColor = 0x202020)
     {
+        if (window == null) return;
+
         // override opacity if premium is unlocked
         if (SettingsManager.Current.IsPremiumUnlocked) blurOpacity = SettingsManager.Current.AcrylicBlurOpacity;
         blurOpacity = Math.Clamp(blurOpacity, 0, 255);
 
         var windowHelper = new WindowInteropHelper(window);
+        if (windowHelper.Handle == IntPtr.Zero) return;
 
         var currentTheme = ApplicationThemeManager.GetAppTheme();
         if (currentTheme == ApplicationTheme.Light)
@@ -42,20 +45,7 @@ public static class WindowBlurHelper
             GradientColor = (blurOpacity << 24) | (blurBackgroundColor & 0xFFFFFF)
         };
 
-        var accentStructSize = Marshal.SizeOf(accent);
-        var accentPtr = Marshal.AllocHGlobal(accentStructSize);
-        Marshal.StructureToPtr(accent, accentPtr, false);
-
-        var data = new WindowCompositionAttributeData
-        {
-            Attribute = WindowCompositionAttribute.WCA_ACCENT_POLICY,
-            SizeOfData = accentStructSize,
-            Data = accentPtr
-        };
-
-        SetWindowCompositionAttribute(windowHelper.Handle, ref data);
-
-        Marshal.FreeHGlobal(accentPtr);
+        SetAccentPolicy(windowHelper.Handle, accent);
     }
 
     /// <summary>
@@ -64,27 +54,17 @@ public static class WindowBlurHelper
     /// <param name="window">The window to disable blur on</param>
     public static void DisableBlur(Window window)
     {
+        if (window == null) return;
+
         var windowHelper = new WindowInteropHelper(window);
+        if (windowHelper.Handle == IntPtr.Zero) return;
 
         var accent = new AccentPolicy
         {
             AccentState = AccentState.ACCENT_DISABLED
         };
 
-        var accentStructSize = Marshal.SizeOf(accent);
-        var accentPtr = Marshal.AllocHGlobal(accentStructSize);
-        Marshal.StructureToPtr(accent, accentPtr, false);
-
-        var data = new WindowCompositionAttributeData
-        {
-            Attribute = WindowCompositionAttribute.WCA_ACCENT_POLICY,
-            SizeOfData = accentStructSize,
-            Data = accentPtr
-        };
-
-        SetWindowCompositionAttribute(windowHelper.Handle, ref data);
-
-        Marshal.FreeHGlobal(accentPtr);
+        SetAccentPolicy(windowHelper.Handle, accent);
     }
 
     /// <summary>
@@ -93,6 +73,8 @@ public static class WindowBlurHelper
     /// <param name="newBlurOpacity">New opacity value (0-255)</param>
     public static void AdjustBlurOpacityForAllWindows(uint newBlurOpacity)
     {
+        if (Application.Current == null) return;
+
         newBlurOpacity = SettingsManager.Current.IsPremiumUnlocked ? Math.Clamp(newBlurOpacity, 0, 255) : 175;
 
         foreach (Window window in Application.Current.Windows)
@@ -114,21 +96,31 @@ public static class WindowBlurHelper
                     GradientColor = (newBlurOpacity << 24) | (blurBackgroundColor & 0xFFFFFF)
                 };
 
-                var accentStructSize = Marshal.SizeOf(accent);
-                var accentPtr = Marshal.AllocHGlobal(accentStructSize);
-                Marshal.StructureToPtr(accent, accentPtr, false);
-
-                var data = new WindowCompositionAttributeData
-                {
-                    Attribute = WindowCompositionAttribute.WCA_ACCENT_POLICY,
-                    SizeOfData = accentStructSize,
-                    Data = accentPtr
-                };
-
-                SetWindowCompositionAttribute(windowHelper.Handle, ref data);
-
-                Marshal.FreeHGlobal(accentPtr);
+                SetAccentPolicy(windowHelper.Handle, accent);
             }
+        }
+    }
+
+    private static void SetAccentPolicy(IntPtr handle, AccentPolicy accent)
+    {
+        var accentStructSize = Marshal.SizeOf(accent);
+        var accentPtr = Marshal.AllocHGlobal(accentStructSize);
+        try
+        {
+            Marshal.StructureToPtr(accent, accentPtr, false);
+
+            var data = new WindowCompositionAttributeData
+            {
+                Attribute = WindowCompositionAttribute.WCA_ACCENT_POLICY,
+                SizeOfData = accentStructSize,
+                Data = accentPtr
+            };
+
+            SetWindowCompositionAttribute(handle, ref data);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(accentPtr);
         }
     }
 

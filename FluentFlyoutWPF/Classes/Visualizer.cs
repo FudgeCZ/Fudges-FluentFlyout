@@ -34,9 +34,12 @@ namespace FluentFlyoutWPF.Classes
         internal const int ImageHeight = 32 * Supersample;
         private const int BarSpacing = 2 * Supersample;
 
+        private static readonly Guid SubTypeIeeeFloat = new("00000003-0000-0010-8000-00AA00389B71");
+
         private WasapiLoopbackCapture? _capture;
         private MMDevice? _renderDevice;
-        private bool _isRunning;
+        private volatile bool _isRunning;
+        private bool _disposed;
 
         private readonly int _fftLength = 4096;
         private int _fftPos = 0;
@@ -47,6 +50,7 @@ namespace FluentFlyoutWPF.Classes
 
         private System.Timers.Timer? _captureWatchdog;
         private DateTime _lastDataAvailableUtc = DateTime.MinValue;
+        private bool _clearedSinceLastAudio;
         private int _restartInProgress; // 0=false, 1=true (Interlocked)
         private string? _deviceId; // track current device ID for restart logic
 
@@ -68,6 +72,7 @@ namespace FluentFlyoutWPF.Classes
         /// </summary>
         public static bool TargetAudible { get; set; }
 
+        private readonly object _lifecycleLock = new();
         private readonly object _dataLock = new();
 
         public Visualizer()
@@ -84,7 +89,10 @@ namespace FluentFlyoutWPF.Classes
         }
 
         private static bool IsAnyVisualizerEnabled() =>
-            TaskbarVisualizerControl.HasAnyEnabledInstance() || SettingsManager.Current.TaskbarVisualizerEnabled;
+            TaskbarVisualizerControl.HasAnyEnabledInstance() ||
+            (SettingsManager.Current.MonitorProfiles.Count > 0
+                ? SettingsManager.Current.MonitorProfiles.Any(m => m.TaskbarWidgetEnabled && m.TaskbarVisualizerEnabled)
+                : (SettingsManager.Current.TaskbarWidgetEnabled && SettingsManager.Current.TaskbarVisualizerEnabled));
 
         private void TryRegisterSystemEvents()
         {
@@ -114,7 +122,7 @@ namespace FluentFlyoutWPF.Classes
 
         private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
         {
-            if (!IsAnyVisualizerEnabled())
+            if (_disposed || !IsAnyVisualizerEnabled())
                 return;
 
             if (e.Reason == SessionSwitchReason.SessionUnlock || e.Reason == SessionSwitchReason.SessionLogon)
@@ -125,7 +133,7 @@ namespace FluentFlyoutWPF.Classes
 
         private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
         {
-            if (!IsAnyVisualizerEnabled())
+            if (_disposed || !IsAnyVisualizerEnabled())
                 return;
 
             if (e.Mode == PowerModes.Resume)
@@ -138,14 +146,14 @@ namespace FluentFlyoutWPF.Classes
         {
             _deviceId = e.DeviceId;
 
-            if (!IsAnyVisualizerEnabled())
+            if (_disposed || !IsAnyVisualizerEnabled())
                 return;
             RequestRestart("default audio output device changed");
         }
 
         private void RequestRestart(string reason)
         {
-            if (!IsAnyVisualizerEnabled())
+            if (_disposed || !IsAnyVisualizerEnabled())
                 return;
 
             if (Interlocked.Exchange(ref _restartInProgress, 1) == 1)
@@ -162,6 +170,8 @@ namespace FluentFlyoutWPF.Classes
                     for (int attempt = 0; attempt < 5; attempt++)
                     {
                         await Task.Delay(500);
+                        if (_disposed || !IsAnyVisualizerEnabled())
+                            return;
                         Start();
                         if (_isRunning)
                             return;
@@ -203,68 +213,107 @@ namespace FluentFlyoutWPF.Classes
 
         public void Start()
         {
-            if (_isRunning)
-                return;
-
-            try
+            lock (_lifecycleLock)
             {
-                _renderDevice?.Dispose();
-                _renderDevice = string.IsNullOrWhiteSpace(_deviceId)
-                     ? AudioDeviceMonitor.Instance.GetDefaultRenderDevice()
-                     : AudioDeviceMonitor.Instance.GetDeviceById(_deviceId) ?? AudioDeviceMonitor.Instance.GetDefaultRenderDevice();
-
-                if (_renderDevice == null)
-                {
+                if (_disposed || _isRunning)
                     return;
-                }
 
-                _capture = new WasapiLoopbackCapture(_renderDevice);
-                _capture.DataAvailable += OnDataAvailable;
-                _capture.RecordingStopped += OnRecordingStopped;
-                _capture.StartRecording();
-                _isRunning = true;
-                _lastDataAvailableUtc = DateTime.UtcNow;
-                StartWatchdog();
-            }
-            catch (Exception ex)
-            {
-                Logger.Error(ex, "Failed to start visualizer");
+                try
+                {
+                    _renderDevice?.Dispose();
+                    _renderDevice = string.IsNullOrWhiteSpace(_deviceId)
+                         ? AudioDeviceMonitor.Instance.GetDefaultRenderDevice()
+                         : AudioDeviceMonitor.Instance.GetDeviceById(_deviceId) ?? AudioDeviceMonitor.Instance.GetDefaultRenderDevice();
+
+                    if (_renderDevice == null)
+                    {
+                        return;
+                    }
+
+                    _capture = new WasapiLoopbackCapture(_renderDevice);
+                    _capture.DataAvailable += OnDataAvailable;
+                    _capture.RecordingStopped += OnRecordingStopped;
+
+                    lock (_dataLock)
+                    {
+                        _fftPos = 0;
+                        _lastDataAvailableUtc = DateTime.UtcNow;
+                        _clearedSinceLastAudio = false;
+                    }
+
+                    _isRunning = true;
+                    _capture.StartRecording();
+                    StartWatchdog();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error(ex, "Failed to start visualizer");
+                    StopInternal();
+                }
             }
         }
 
         private void StartWatchdog()
         {
-            _captureWatchdog = new(500)
+            _captureWatchdog?.Stop();
+            _captureWatchdog?.Dispose();
+            _captureWatchdog = new System.Timers.Timer(500)
             {
-                AutoReset = false
+                AutoReset = true
             };
             _captureWatchdog.Elapsed += OnWatchdogTick;
+            _captureWatchdog.Start();
         }
 
         private void OnWatchdogTick(object? sender, System.Timers.ElapsedEventArgs e)
         {
-            if (!_isRunning)
+            if (!_isRunning || _disposed)
                 return;
 
-            var controls = TaskbarVisualizerControl.GetActiveInstances();
+            TimeSpan silenceFor;
+            List<TaskbarVisualizerControl>? controlsToClear = null;
+            List<TaskbarVisualizerControl>? controlsToHide = null;
+
             lock (_dataLock)
             {
+                if (!_isRunning || _disposed)
+                    return;
+
+                silenceFor = DateTime.UtcNow - _lastDataAvailableUtc;
+                if (silenceFor < TimeSpan.FromMilliseconds(450))
+                    return;
+
                 CurrentEnergy = 0;
-                foreach (var ctrl in controls)
+
+                if (!_clearedSinceLastAudio)
                 {
-                    ctrl.ClearBarsToSilence();
-                    RenderControlBitmap(ctrl);
+                    _clearedSinceLastAudio = true;
+                    var controls = TaskbarVisualizerControl.GetActiveInstances();
+                    controlsToClear = [];
+                    controlsToHide = [];
+                    foreach (var ctrl in controls)
+                    {
+                        ctrl.ClearBarsToSilence();
+                        controlsToClear.Add(ctrl);
+                        var s = ctrl.Settings;
+                        if (!s.TaskbarVisualizerBaseline || s.TaskbarVisualizerBaselineAutoHide)
+                            controlsToHide.Add(ctrl);
+                    }
                 }
             }
 
-            foreach (var ctrl in controls)
+            if (controlsToClear != null)
             {
-                var s = ctrl.Settings;
-                if (!s.TaskbarVisualizerBaseline || s.TaskbarVisualizerBaselineAutoHide)
-                    s.TaskbarVisualizerHasContent = false;
+                foreach (var ctrl in controlsToClear)
+                    RenderControlBitmap(ctrl);
             }
 
-            var silenceFor = DateTime.UtcNow - _lastDataAvailableUtc;
+            if (controlsToHide != null)
+            {
+                foreach (var ctrl in controlsToHide)
+                    SetVisualizerHasContent(ctrl.Settings, false);
+            }
+
             if (silenceFor > TimeSpan.FromSeconds(2))
             {
                 RequestRestart($"no audio callbacks for {silenceFor.TotalSeconds:0.0}s");
@@ -273,16 +322,36 @@ namespace FluentFlyoutWPF.Classes
 
         public void Stop()
         {
-            if (!_isRunning)
-                return;
+            lock (_lifecycleLock)
+            {
+                StopInternal();
+            }
+        }
 
+        private void StopInternal()
+        {
             _isRunning = false;
+
+            if (_captureWatchdog != null)
+            {
+                _captureWatchdog.Elapsed -= OnWatchdogTick;
+                _captureWatchdog.Stop();
+                _captureWatchdog.Dispose();
+                _captureWatchdog = null;
+            }
 
             if (_capture != null)
             {
                 _capture.DataAvailable -= OnDataAvailable;
                 _capture.RecordingStopped -= OnRecordingStopped;
-                _capture.StopRecording();
+                try
+                {
+                    _capture.StopRecording();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Debug(ex, "Error stopping visualizer capture");
+                }
                 _capture.Dispose();
                 _capture = null;
             }
@@ -290,44 +359,89 @@ namespace FluentFlyoutWPF.Classes
             _renderDevice?.Dispose();
             _renderDevice = null;
 
-            _captureWatchdog?.Stop();
-            _captureWatchdog?.Dispose();
-            _captureWatchdog = null;
+            lock (_dataLock)
+            {
+                _fftPos = 0;
+                CurrentEnergy = 0;
+            }
         }
 
         private void OnDataAvailable(object? sender, WaveInEventArgs e)
         {
-            if (!_isRunning || e.BytesRecorded == 0)
+            if (!_isRunning || _disposed || e.BytesRecorded <= 0)
                 return;
 
-            int bytesPerSample = _capture!.WaveFormat.BitsPerSample / 8;
-            HandleAudioData(e.Buffer, e.BytesRecorded, bytesPerSample);
+            if (sender is not WasapiLoopbackCapture capture)
+                return;
+
+            HandleAudioData(e.Buffer, e.BytesRecorded, capture.WaveFormat);
         }
 
-        private void HandleAudioData(byte[] buffer, int bytesRecorded, int bytesPerSample)
+        private void HandleAudioData(byte[] buffer, int bytesRecorded, WaveFormat waveFormat)
         {
+            int channels = Math.Max(1, waveFormat.Channels);
+            int bytesPerSample = waveFormat.BitsPerSample / 8;
+            if (bytesPerSample <= 0)
+                return;
+
+            int frameSize = bytesPerSample * channels;
+            if (frameSize <= 0)
+                return;
+
+            bool isFloat = waveFormat.Encoding == WaveFormatEncoding.IeeeFloat ||
+                           (waveFormat is WaveFormatExtensible wfe && wfe.SubFormat == SubTypeIeeeFloat);
+            int sampleRate = waveFormat.SampleRate > 0 ? waveFormat.SampleRate : 48000;
+
             lock (_dataLock)
             {
-                if (!_isRunning || bytesRecorded == 0)
+                if (!_isRunning || _disposed || bytesRecorded <= 0)
                     return;
 
-                _captureWatchdog?.Stop();
-                _captureWatchdog?.Start();
                 _lastDataAvailableUtc = DateTime.UtcNow;
+                _clearedSinceLastAudio = false;
 
-                int samplesRecorded = bytesRecorded / bytesPerSample;
+                int framesRecorded = Math.Min(bytesRecorded, buffer.Length) / frameSize;
 
-                for (int i = 0; i < samplesRecorded; i++)
+                for (int f = 0; f < framesRecorded; f++)
                 {
-                    float sampleValue = 0;
-                    if (bytesPerSample == 4)
+                    int frameOffset = f * frameSize;
+                    float sampleSum = 0f;
+
+                    for (int ch = 0; ch < channels; ch++)
                     {
-                        sampleValue = BitConverter.ToSingle(buffer, i * 4);
+                        int offset = frameOffset + (ch * bytesPerSample);
+                        float channelSample = 0f;
+
+                        if (bytesPerSample == 4)
+                        {
+                            if (isFloat)
+                            {
+                                float s = BitConverter.ToSingle(buffer, offset);
+                                channelSample = float.IsFinite(s) ? s : 0f;
+                            }
+                            else
+                            {
+                                channelSample = BitConverter.ToInt32(buffer, offset) / 2147483648f;
+                            }
+                        }
+                        else if (bytesPerSample == 3)
+                        {
+                            int sample24 = buffer[offset] | (buffer[offset + 1] << 8) | ((sbyte)buffer[offset + 2] << 16);
+                            channelSample = sample24 / 8388608f;
+                        }
+                        else if (bytesPerSample == 2)
+                        {
+                            channelSample = BitConverter.ToInt16(buffer, offset) / 32768f;
+                        }
+                        else if (bytesPerSample == 1)
+                        {
+                            channelSample = (buffer[offset] - 128) / 128f;
+                        }
+
+                        sampleSum += channelSample;
                     }
-                    else if (bytesPerSample == 2)
-                    {
-                        sampleValue = BitConverter.ToInt16(buffer, i * 2) / 32768f;
-                    }
+
+                    float sampleValue = sampleSum / channels;
 
                     _fftBuffer[_fftPos].X = (float)(sampleValue * FastFourierTransform.HammingWindow(_fftPos, _fftLength));
                     _fftBuffer[_fftPos].Y = 0;
@@ -353,43 +467,80 @@ namespace FluentFlyoutWPF.Classes
 
                     foreach (var ctrl in controls)
                     {
-                        if (!ctrl.Settings.TaskbarVisualizerEnabled)
+                        if (!ctrl.Settings.TaskbarWidgetEnabled || !ctrl.Settings.TaskbarVisualizerEnabled)
                             continue;
 
-                        bool hasAudio = ProcessFftForControl(ctrl, !energyComputed);
+                        bool hasAudio = ProcessFftForControl(ctrl, sampleRate, !energyComputed);
                         energyComputed = true;
 
                         if (ctrl.Settings.TaskbarVisualizerBaseline && !ctrl.Settings.TaskbarVisualizerBaselineAutoHide)
                         {
-                            ctrl.Settings.TaskbarVisualizerHasContent = true;
+                            SetVisualizerHasContent(ctrl.Settings, true);
                             RenderControlBitmap(ctrl);
                         }
                         else if (hasAudio)
                         {
-                            ctrl.Settings.TaskbarVisualizerHasContent = true;
+                            SetVisualizerHasContent(ctrl.Settings, true);
                             RenderControlBitmap(ctrl);
                         }
                         else
                         {
-                            ctrl.Settings.TaskbarVisualizerHasContent = false;
+                            bool hadContent = ctrl.Settings.TaskbarVisualizerHasContent;
+                            SetVisualizerHasContent(ctrl.Settings, false);
+                            if (hadContent)
+                            {
+                                ctrl.ClearBarsToSilence();
+                                RenderControlBitmap(ctrl);
+                            }
                         }
+                    }
+
+                    if (!energyComputed)
+                    {
+                        CurrentEnergy = 0;
                     }
                 }
             }
         }
 
-        private bool ProcessFftForControl(TaskbarVisualizerControl ctrl, bool updateGlobalEnergy)
+        private void SetVisualizerHasContent(MonitorTaskbarSettings settings, bool hasContent)
+        {
+            if (settings.TaskbarVisualizerHasContent == hasContent)
+                return;
+
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher == null)
+                return;
+
+            if (dispatcher.CheckAccess())
+            {
+                if (settings.TaskbarVisualizerHasContent != hasContent)
+                    settings.TaskbarVisualizerHasContent = hasContent;
+            }
+            else
+            {
+                dispatcher.InvokeAsync(() =>
+                {
+                    if (!_disposed && settings.TaskbarVisualizerHasContent != hasContent)
+                        settings.TaskbarVisualizerHasContent = hasContent;
+                });
+            }
+        }
+
+        private bool ProcessFftForControl(TaskbarVisualizerControl ctrl, int sampleRate, bool updateGlobalEnergy)
         {
             int barCount = Math.Clamp(ctrl.Settings.TaskbarVisualizerBarCount, 1, 64);
             ctrl.EnsureBarArrays(barCount);
             float[] barValues = ctrl.BarValues;
+            float[] peakValues = ctrl.PeakValues;
 
             if (!string.IsNullOrEmpty(TargetApp) && !TargetAudible)
             {
                 bool any = false;
                 for (int i = 0; i < barCount; i++)
                 {
-                    barValues[i] *= 0.8f;
+                    barValues[i] = float.IsFinite(barValues[i]) ? barValues[i] * 0.8f : 0f;
+                    peakValues[i] = float.IsFinite(peakValues[i]) ? peakValues[i] * 0.985f : 0f;
                     if (barValues[i] > 0.01f)
                         any = true;
                 }
@@ -398,13 +549,13 @@ namespace FluentFlyoutWPF.Classes
                 return any;
             }
 
-            int sampleRate = _capture?.WaveFormat.SampleRate ?? 48000;
             double frequencyPerBin = (double)sampleRate / _fftLength;
 
             double minFreq = 40;   // Hz
             double maxFreq = 8000; // Hz
             float minDb = (SettingsManager.Current.TaskbarVisualizerAudioSensitivity * -10f) - 30f;
             float maxDb = (SettingsManager.Current.TaskbarVisualizerAudioPeakLevel * 10f) - 30f;
+            float dbRange = Math.Max(1e-3f, maxDb - minDb);
 
             bool allZero = true;
             for (int i = 0; i < barCount; i++)
@@ -422,7 +573,7 @@ namespace FluentFlyoutWPF.Classes
                 for (int j = startBin; j < endBin; j++)
                 {
                     float amplitude = (float)Math.Sqrt(_fftBuffer[j].X * _fftBuffer[j].X + _fftBuffer[j].Y * _fftBuffer[j].Y);
-                    if (amplitude > maxAmplitude)
+                    if (float.IsFinite(amplitude) && amplitude > maxAmplitude)
                         maxAmplitude = amplitude;
                 }
 
@@ -433,12 +584,16 @@ namespace FluentFlyoutWPF.Classes
                 if (maxAmplitude < 0.001f) maxAmplitude = 0.001f;
 
                 float db = 20f * (float)Math.Log10(maxAmplitude);
-                float intensity = Math.Clamp((db - minDb) / (maxDb - minDb), 0f, 1f);
+                float intensity = float.IsFinite(db) ? Math.Clamp((db - minDb) / dbRange, 0f, 1f) : 0f;
 
-                if (intensity > barValues[i])
+                float prev = float.IsFinite(barValues[i]) ? barValues[i] : 0f;
+                if (intensity > prev)
                     barValues[i] = intensity;
                 else
-                    barValues[i] = (barValues[i] * 0.8f) + (intensity * 0.2f);
+                    barValues[i] = (prev * 0.8f) + (intensity * 0.2f);
+
+                float prevPeak = float.IsFinite(peakValues[i]) ? peakValues[i] : 0f;
+                peakValues[i] = Math.Max(prevPeak * 0.985f, barValues[i]);
 
                 if (barValues[i] > 0.01f)
                     allZero = false;
@@ -471,7 +626,7 @@ namespace FluentFlyoutWPF.Classes
 
             ctrl.EnsureBarArrays(barCount);
             float[] barValuesSnapshot = (float[])ctrl.BarValues.Clone();
-            float[] peakValues = ctrl.PeakValues;
+            float[] peakValuesSnapshot = (float[])ctrl.PeakValues.Clone();
 
             Application.Current?.Dispatcher?.InvokeAsync(() =>
             {
@@ -495,7 +650,7 @@ namespace FluentFlyoutWPF.Classes
                             if (style == 2)
                                 DrawWave(stride, buffer, imageWidth, barCount, barValuesSnapshot, centeredBars, baselineEnabled);
                             else
-                                DrawColumnBars(stride, buffer, imageWidth, barCount, barValuesSnapshot, peakValues, centeredBars, baselineEnabled, drawPeaks: style == 1);
+                                DrawColumnBars(stride, buffer, imageWidth, barCount, barValuesSnapshot, peakValuesSnapshot, centeredBars, baselineEnabled, drawPeaks: style == 1);
                         }
 
                         bmp.AddDirtyRect(new Int32Rect(0, 0, imageWidth, ImageHeight));
@@ -508,6 +663,17 @@ namespace FluentFlyoutWPF.Classes
             }, System.Windows.Threading.DispatcherPriority.Render);
         }
 
+        private static void GetVisualizerColor(out byte b, out byte g, out byte r)
+        {
+            SolidColorBrush? brush = BitmapHelper.SavedDominantColors.Count > 0
+                ? BitmapHelper.SavedDominantColors.Last()
+                : Application.Current?.TryFindResource("MicaWPF.Brushes.SystemAccentColorTertiary") as SolidColorBrush;
+            Color color = brush?.Color ?? Colors.White;
+            b = color.B;
+            g = color.G;
+            r = color.R;
+        }
+
         private unsafe void DrawWave(
             int stride,
             Span<byte> buffer,
@@ -517,10 +683,7 @@ namespace FluentFlyoutWPF.Classes
             bool centered,
             bool baselineEnabled)
         {
-            SolidColorBrush brush = BitmapHelper.SavedDominantColors.Count > 0
-                ? BitmapHelper.SavedDominantColors.Last()
-                : (SolidColorBrush)Application.Current.TryFindResource("MicaWPF.Brushes.SystemAccentColorTertiary");
-            byte b = brush.Color.B, g = brush.Color.G, r = brush.Color.R;
+            GetVisualizerColor(out byte b, out byte g, out byte r);
 
             int baseline = baselineEnabled ? Supersample * 2 : 0;
             int centerY = ImageHeight / 2;
@@ -554,8 +717,8 @@ namespace FluentFlyoutWPF.Classes
 
                 for (int y = Math.Max(0, y0); y < Math.Min(ImageHeight, y1); y++)
                 {
-                    float edge = Math.Min(y - Math.Max(0, y0), Math.Min(ImageHeight - 1, y1 - 1) - y);
-                    byte a = edge < 1 ? (byte)(255 * Math.Clamp(edge, 0f, 1f)) : (byte)255;
+                    float edge = Math.Min(y - y0 + 0.5f, y1 - 1 - y + 0.5f);
+                    byte a = edge < 1f ? (byte)(255 * Math.Clamp(edge, 0f, 1f)) : (byte)255;
                     int index = y * stride + (x << 2);
                     if (index + 3 >= buffer.Length) continue;
                     WritePixel(buffer, index, b, g, r, a);
@@ -574,18 +737,13 @@ namespace FluentFlyoutWPF.Classes
             bool baselineEnabled,
             bool drawPeaks)
         {
-            SolidColorBrush brush = BitmapHelper.SavedDominantColors.Count > 0
-                ? BitmapHelper.SavedDominantColors.Last()
-                : (SolidColorBrush)Application.Current.TryFindResource("MicaWPF.Brushes.SystemAccentColorTertiary");
-
-            byte b = brush.Color.B;
-            byte g = brush.Color.G;
-            byte r = brush.Color.R;
+            GetVisualizerColor(out byte b, out byte g, out byte r);
 
             int barBaseline = baselineEnabled ? Supersample * 2 : 0;
             int centerY = ImageHeight / 2;
 
-            ComputeLayout(imageWidth, barCount, BarSpacing, out int barWidth, out int offsetX);
+            int spacing = BarSpacing;
+            ComputeLayout(imageWidth, barCount, ref spacing, out int barWidth, out int offsetX);
 
             float baseRadius = (2f * Supersample) / MathF.Max(1f, barCount / 10f);
             const float aa = 1.25f;
@@ -593,7 +751,7 @@ namespace FluentFlyoutWPF.Classes
 
             for (int i = 0; i < barCount && i < barValues.Length; i++)
             {
-                int barX = offsetX + i * (barWidth + BarSpacing);
+                int barX = offsetX + i * (barWidth + spacing);
                 int barHeight = GetBarHeight(barValues[i], barBaseline);
 
                 if (barHeight <= 0)
@@ -619,16 +777,15 @@ namespace FluentFlyoutWPF.Classes
 
             for (int i = 0; i < barCount && i < barValues.Length && i < peakValues.Length; i++)
             {
-                float peak = Math.Max(peakValues[i] * 0.985f, barValues[i]);
-                peakValues[i] = peak;
+                float peak = Math.Max(peakValues[i], barValues[i]);
                 if (peak < 0.01f) continue;
 
-                int barX = offsetX + i * (barWidth + BarSpacing);
+                int barX = offsetX + i * (barWidth + spacing);
                 int capHeight = (int)(Math.Clamp(peak, 0f, 1f) * (ImageHeight - barBaseline * 2));
                 int capY = centeredBars
                     ? centerY - capHeight / 2
                     : ImageHeight - barBaseline - capHeight;
-                capY = Math.Clamp(capY, 0, ImageHeight - 2);
+                capY = Math.Clamp(capY, 0, Math.Max(0, ImageHeight - 2 * Supersample));
 
                 for (int x = barX; x < barX + barWidth && x < imageWidth && x >= 0; x++)
                 {
@@ -645,20 +802,20 @@ namespace FluentFlyoutWPF.Classes
         private static void ComputeLayout(
             int imageWidth,
             int barCount,
-            int spacing,
+            ref int spacing,
             out int barWidth,
             out int offsetX)
         {
             if (barCount + (barCount - 1) * spacing + 1 > imageWidth)
             {
-                spacing = Math.Max(1, (imageWidth - 1 - barCount) / Math.Max(1, barCount - 1));
+                spacing = Math.Max(0, (imageWidth - 1 - barCount) / Math.Max(1, barCount - 1));
             }
 
             int totalSpacing = (barCount - 1) * spacing;
             int availableWidth = imageWidth - totalSpacing - 1;
             barWidth = Math.Max(1, availableWidth / Math.Max(1, barCount));
             int usedWidth = barWidth * barCount + totalSpacing;
-            offsetX = (imageWidth - usedWidth) >> 1;
+            offsetX = Math.Max(0, (imageWidth - usedWidth) >> 1);
         }
 
         private void ComputeVertical(bool centered, int centerY, int height, out int y, out int endY)
@@ -765,9 +922,27 @@ namespace FluentFlyoutWPF.Classes
 
         private static void WritePixel(Span<byte> buffer, int index, byte b, byte g, byte r, byte a)
         {
-            buffer[index] = b;
-            buffer[index + 1] = g;
-            buffer[index + 2] = r;
+            if (a == 255)
+            {
+                buffer[index] = b;
+                buffer[index + 1] = g;
+                buffer[index + 2] = r;
+                buffer[index + 3] = 255;
+                return;
+            }
+
+            if (a == 0)
+            {
+                buffer[index] = 0;
+                buffer[index + 1] = 0;
+                buffer[index + 2] = 0;
+                buffer[index + 3] = 0;
+                return;
+            }
+
+            buffer[index] = (byte)(b * a / 255);
+            buffer[index + 1] = (byte)(g * a / 255);
+            buffer[index + 2] = (byte)(r * a / 255);
             buffer[index + 3] = a;
         }
 
@@ -781,18 +956,16 @@ namespace FluentFlyoutWPF.Classes
 
         public void Dispose()
         {
-            Stop();
+            lock (_lifecycleLock)
+            {
+                if (_disposed)
+                    return;
+                _disposed = true;
+                StopInternal();
+            }
 
             AudioDeviceMonitor.Instance.DefaultDeviceChanged -= OnDefaultDeviceChanged;
             TryUnregisterSystemEvents();
-
-            if (_capture != null)
-            {
-                _capture.DataAvailable -= OnDataAvailable;
-                _capture.RecordingStopped -= OnRecordingStopped;
-                _capture.Dispose();
-                _capture = null;
-            }
 
             GC.SuppressFinalize(this);
         }

@@ -627,7 +627,7 @@ public partial class UserSettings : ObservableObject
     public partial bool AppFilteringEnabled { get; set; }
 
     /// <summary>
-    /// Returns the active filtering mode. 0 for Whitelist, 1 for Blacklist.
+    /// Returns the active filtering mode. 0 for Blacklist, 1 for Whitelist.
     /// </summary>
     [ObservableProperty]
     public partial int AppFilteringMode { get; set; }
@@ -960,7 +960,7 @@ public partial class UserSettings : ObservableObject
     /// </summary>
     public void SetMonitorFeatureEnabled(int monitorIndex, string feature, bool enabled)
     {
-        if ((feature == "Widget" || feature == "Visualizer") && enabled && !IsPremiumUnlocked)
+        if ((feature == "Widget" || feature == "Visualizer" || feature == "Lyrics") && enabled && !IsPremiumUnlocked)
             return;
 
         SyncActiveMonitorFromUserSettings();
@@ -1074,6 +1074,7 @@ public partial class UserSettings : ObservableObject
         LockKeysInsertEnabled = true;
         MediaFlyoutBackgroundBlur = 0;
         AppLanguage = "system";
+        SelectedLanguage = LanguageOptions.First(l => l.Tag == "system");
         FlowDirection = FlowDirection.LeftToRight;
         FontFamily = "Segoe UI Variable, Microsoft YaHei UI, Yu Gothic UI";
         MediaFlyoutAcrylicWindowEnabled = true;
@@ -1153,6 +1154,16 @@ public partial class UserSettings : ObservableObject
     [XmlIgnore]
     private CancellationTokenSource? _saveSettingsCts;
 
+    internal void CancelPendingSave()
+    {
+        var oldCts = Interlocked.Exchange(ref _saveSettingsCts, null);
+        if (oldCts != null)
+        {
+            try { oldCts.Cancel(); } catch (ObjectDisposedException) { }
+            try { oldCts.Dispose(); } catch (ObjectDisposedException) { }
+        }
+    }
+
     private async void OnPropertyChangedSaveSettings(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
         if (_initializing || _switchingMonitorProfile) return;
@@ -1209,6 +1220,22 @@ public partial class UserSettings : ObservableObject
     /// </summary>
     internal void CompleteInitialization()
     {
+        if (PhoneReceiverPort is < 1024 or > 65535)
+            PhoneReceiverPort = 58710;
+        if (YtmBridgePort is < 1024 or > 65535)
+            YtmBridgePort = 26538;
+
+        var matchedLanguage = LanguageOptions.FirstOrDefault(l => l.Tag == AppLanguage)
+            ?? LanguageOptions.FirstOrDefault(l => l.Tag == "system");
+        if (matchedLanguage != null)
+        {
+            SelectedLanguage = matchedLanguage;
+            if (AppLanguage != matchedLanguage.Tag)
+            {
+                AppLanguage = matchedLanguage.Tag;
+            }
+        }
+
         if (MonitorProfiles.Count == 0)
         {
             var initial = new MonitorTaskbarSettings { MonitorIndex = Math.Max(0, TaskbarWidgetSelectedMonitor) };
@@ -1226,7 +1253,9 @@ public partial class UserSettings : ObservableObject
             _switchingMonitorProfile = true;
             try
             {
-                GetMonitorSettings(TaskbarWidgetSelectedMonitor).ApplyToUserSettings(this);
+                var activeProfile = GetMonitorSettings(TaskbarWidgetSelectedMonitor);
+                activeProfile.ApplyToUserSettings(this);
+                TaskbarVisualizerHasContent = activeProfile.TaskbarVisualizerHasContent;
             }
             finally
             {
@@ -1235,6 +1264,7 @@ public partial class UserSettings : ObservableObject
         }
 
         _initializing = false;
+        Visualizer.ResizeBarList(TaskbarVisualizerBarCount);
     }
 
     partial void OnTaskbarWidgetSelectedMonitorChanged(int oldValue, int newValue)
@@ -1252,22 +1282,31 @@ public partial class UserSettings : ObservableObject
         {
             var nextProfile = GetMonitorSettings(newValue);
             nextProfile.ApplyToUserSettings(this);
+            TaskbarVisualizerHasContent = nextProfile.TaskbarVisualizerHasContent;
         }
         finally
         {
             _switchingMonitorProfile = false;
         }
+
+        Visualizer.ResizeBarList(TaskbarVisualizerBarCount);
+        TaskbarVisualizerControl.RefreshSharedVisualizerState();
+        Application.Current?.Dispatcher?.BeginInvoke(() => TaskbarVisualizerControl.ApplyBeatGlow());
     }
 
     partial void OnAppLanguageChanged(string oldValue, string newValue)
     {
-        if (oldValue == newValue) return;
-        SelectedLanguage = LanguageOptions.First(l => l.Tag == newValue);
+        if (oldValue == newValue || _initializing) return;
+        var matched = LanguageOptions.FirstOrDefault(l => l.Tag == newValue);
+        if (matched != null)
+        {
+            SelectedLanguage = matched;
+        }
     }
 
     partial void OnSelectedLanguageChanged(LanguageOption oldValue, LanguageOption newValue)
     {
-        if (oldValue == newValue || _initializing) return;
+        if (oldValue == newValue || _initializing || newValue == null) return;
         AppLanguage = newValue.Tag;
         LocalizationManager.ApplyLocalization();
     }
@@ -1278,7 +1317,7 @@ public partial class UserSettings : ObservableObject
     partial void OnAppThemeChanged(int oldValue, int newValue)
     {
         if (oldValue == newValue || _initializing) return;
-        ThemeManager.ApplyAndSaveTheme(newValue);
+        ThemeManager.ApplyThemeForSetting(newValue);
     }
 
     partial void OnNIconSymbolChanged(bool oldValue, bool newValue)
@@ -1304,10 +1343,23 @@ public partial class UserSettings : ObservableObject
         if (oldValue == newValue || _initializing) return;
         if (newValue is < 1024 or > 65535)
         {
-            PhoneReceiverPort = oldValue;
+            int fallback = oldValue is >= 1024 and <= 65535 ? oldValue : 58710;
+            PhoneReceiverPort = fallback;
+            Application.Current?.Dispatcher?.BeginInvoke(() => OnPropertyChanged(nameof(PhoneReceiverPort)));
             return;
         }
         Classes.Services.Phone.PhoneReceiverService.Instance.ApplyFromSettings();
+    }
+
+    partial void OnYtmBridgePortChanged(int oldValue, int newValue)
+    {
+        if (oldValue == newValue || _initializing) return;
+        if (newValue is < 1024 or > 65535)
+        {
+            int fallback = oldValue is >= 1024 and <= 65535 ? oldValue : 26538;
+            YtmBridgePort = fallback;
+            Application.Current?.Dispatcher?.BeginInvoke(() => OnPropertyChanged(nameof(YtmBridgePort)));
+        }
     }
 
     partial void OnPhoneReceiverDiscoveryChanged(bool oldValue, bool newValue)
@@ -1477,6 +1529,14 @@ public partial class UserSettings : ObservableObject
     partial void OnTaskbarVisualizerEnabledChanged(bool oldValue, bool newValue)
     {
         if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
+
+        // Check premium status before allowing visualizer to be enabled
+        if (newValue && !SettingsManager.Current.IsPremiumUnlocked)
+        {
+            TaskbarVisualizerEnabled = false;
+            return;
+        }
+
         SyncActiveMonitorFromUserSettings();
         TaskbarVisualizerControl.OnTaskbarVisualizerEnabledChanged(newValue);
         UpdateTaskbar();
@@ -1532,9 +1592,11 @@ public partial class UserSettings : ObservableObject
     partial void OnMediaSessionPriorityAppChanged(string oldValue, string newValue)
     {
         if (oldValue == newValue || _initializing) return;
-        MainWindow mainWindow = (MainWindow)Application.Current.MainWindow;
-        mainWindow.UpdateTaskbar();
-        mainWindow.RefreshMediaUi();
+        if (Application.Current?.MainWindow is MainWindow mainWindow)
+        {
+            mainWindow.UpdateTaskbar();
+            mainWindow.RefreshMediaUi();
+        }
     }
 
     partial void OnTaskbarVisualizerBaselineChanged(bool oldValue, bool newValue)
@@ -1568,16 +1630,14 @@ public partial class UserSettings : ObservableObject
     {
         if (oldValue == newValue || _initializing) return;
 
-        MainWindow mainWindow = (MainWindow)Application.Current.MainWindow;
-        mainWindow?.RefreshFilteredMedia();
+        (Application.Current?.MainWindow as MainWindow)?.RefreshFilteredMedia();
     }
 
     partial void OnAppFilteringModeChanged(int oldValue, int newValue)
     {
         if (oldValue == newValue || _initializing) return;
 
-        MainWindow mainWindow = (MainWindow)Application.Current.MainWindow;
-        mainWindow?.RefreshFilteredMedia();
+        (Application.Current?.MainWindow as MainWindow)?.RefreshFilteredMedia();
     }
 
     partial void OnVolumeMixerHighlightActiveAppsChanged(bool oldValue, bool newValue)

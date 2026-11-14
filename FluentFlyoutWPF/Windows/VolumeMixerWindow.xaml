@@ -6,7 +6,7 @@
       xmlns:local="clr-namespace:FluentFlyoutWPF"
       xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
       xmlns:controls="clr-namespace:MicaWPF.Controls;assembly=MicaWPF"
-      xmlns:viewModels="clr-namespace:FluentFlyoutWPF.ViewModels"
+      xmlns:windows="clr-namespace:FluentFlyoutWPF.Windows"
       xmlns:converters="clr-namespace:FluentFlyoutWPF.Classes.Converters"
       mc:Ignorable="d"
       Title="VolumeMixerWindow" Height="50" Width="240"
@@ -16,7 +16,7 @@
       TextOptions.TextRenderingMode="ClearType" TextOptions.TextFormattingMode="Ideal"
       FontFamily="{Binding UserSettings.FontFamily}"
       FlowDirection="{Binding UserSettings.FlowDirection}"
-      d:DataContext="{d:DesignInstance viewModels:UserSettings}">
+      d:DataContext="{d:DesignInstance windows:VolumeMixerWindow}">
     
     <Window.Triggers>
         <EventTrigger RoutedEvent="Window.Loaded">

@@ -44,33 +44,38 @@ public class OnboardingViewModel : ObservableObject
         }
     }
 
-    public IReadOnlyList<OnboardingStep> Steps { get; } =
+    private static string GetResourceString(string key) =>
+        Application.Current?.TryFindResource(key)?.ToString() ?? key;
+
+    private static IReadOnlyList<OnboardingStep> BuildSteps() =>
     [
         new OnboardingStep
         {
-            Title = Application.Current.TryFindResource("MediaFlyoutTitle").ToString(),
-            Description = Application.Current.TryFindResource("MediaFlyoutDescription").ToString(),
+            Title = GetResourceString("MediaFlyoutTitle"),
+            Description = GetResourceString("MediaFlyoutDescription"),
             ImageSource = "/Resources/Onboarding/MediaFlyout.png"
         },
         new OnboardingStep
         {
-            Title = Application.Current.TryFindResource("VolumeFlyoutTitle").ToString(),
-            Description = Application.Current.TryFindResource("VolumeFlyoutDescription").ToString(),
+            Title = GetResourceString("VolumeFlyoutTitle"),
+            Description = GetResourceString("VolumeFlyoutDescription"),
             ImageSource = "/Resources/FluentFlyoutVolumeDemo.png"
         },
         new OnboardingStep
         {
-            Title = Application.Current.TryFindResource("LockKeysCustomizationTitle").ToString(),
-            Description = Application.Current.TryFindResource("LockKeysDescription").ToString(),
+            Title = GetResourceString("LockKeysCustomizationTitle"),
+            Description = GetResourceString("LockKeysDescription"),
             ImageSource = "/Resources/Onboarding/LockKeysFlyout.png"
         },
         new OnboardingStep
         {
-            Title = Application.Current.TryFindResource("UnlockFullExperienceText").ToString(),
+            Title = GetResourceString("UnlockFullExperienceText"),
             Description = "",
             ImageSource = "/Resources/Onboarding/Taskbar.png"
         }
     ];
+
+    public IReadOnlyList<OnboardingStep> Steps { get; private set; } = BuildSteps();
 
     public int CurrentStepIndex
     {
@@ -95,9 +100,9 @@ public class OnboardingViewModel : ObservableObject
 
     public OnboardingStep CurrentStep => Steps[CurrentStepIndex];
 
-    public string StepProgressText => string.Format(Application.Current.TryFindResource("OnboardingStepsCounter").ToString(), CurrentStepIndex + 1, Steps.Count);
+    public string StepProgressText => string.Format(GetResourceString("OnboardingStepsCounter"), CurrentStepIndex + 1, Steps.Count);
 
-    public string? NextButtonText => IsLastStep ? Application.Current.TryFindResource("Finish").ToString() : Application.Current.TryFindResource("Next").ToString();
+    public string? NextButtonText => IsLastStep ? GetResourceString("Finish") : GetResourceString("Next");
 
     public bool IsLastStep => CurrentStepIndex >= Steps.Count - 1;
 
@@ -124,6 +129,19 @@ public class OnboardingViewModel : ObservableObject
         GoBackCommand = new RelayCommand(GoBack, () => CanGoBack && !IsTransitioning);
         GoNextCommand = new RelayCommand(GoNext, () => !IsTransitioning);
         SkipCommand = new RelayCommand(Skip);
+        System.ComponentModel.PropertyChangedEventManager.AddHandler(
+            FluentFlyout.Classes.Settings.SettingsManager.Current,
+            OnSettingsPropertyChanged,
+            nameof(UserSettings.AppLanguage));
+    }
+
+    private void OnSettingsPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        Steps = BuildSteps();
+        OnPropertyChanged(nameof(Steps));
+        OnPropertyChanged(nameof(CurrentStep));
+        OnPropertyChanged(nameof(StepProgressText));
+        OnPropertyChanged(nameof(NextButtonText));
     }
 
     private void GoBack()

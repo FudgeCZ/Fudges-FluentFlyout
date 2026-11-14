@@ -20,9 +20,11 @@ public class BoolToAccentBrushConverter : IValueConverter
 
         if (value is bool isActive && isActive)
         {
-            if (Application.Current.TryFindResource("AccentTextFillColorPrimaryBrush") is SolidColorBrush accentBrush)
+            if (Application.Current?.TryFindResource("AccentTextFillColorPrimaryBrush") is SolidColorBrush accentBrush)
             {
-                return new SolidColorBrush(accentBrush.Color) { Opacity = ActiveOpacity };
+                var brush = new SolidColorBrush(accentBrush.Color) { Opacity = ActiveOpacity };
+                brush.Freeze();
+                return brush;
             }
         }
 

@@ -34,15 +34,11 @@ namespace FluentFlyoutWPF.Classes.Utils
             }
             catch { }
 
-            // if neither of those exist, return hardcoded path
-            // %localAppData%\Packages\unchihugo.FluentFlyout_69b7b6qge1ahj\LocalCache\Roaming\FluentFlyout
+            // if neither of those exist, fall back to %localAppData%\FluentFlyout\logs for unpackaged builds
             return Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Packages",
-                "unchihugo.FluentFlyout_69b7b6qge1ahj",
-                "LocalCache",
-                "Roaming",
-                "FluentFlyout"
+                "FluentFlyout",
+                "logs"
             );
         }
     }

@@ -9,6 +9,7 @@ using FluentFlyoutWPF.Models;
 using NAudio.CoreAudioApi;
 using NAudio.CoreAudioApi.Interfaces;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Windows.Threading;
 
@@ -23,6 +24,8 @@ public partial class VolumeMixerViewModel : ObservableObject, IDisposable
 
     private MMDevice? _device;
     private DispatcherTimer? _pollTimer;
+    private bool _syncingFromDevice;
+    private bool _disposed;
 
     [ObservableProperty]
     public partial float MasterVolume { get; set; }
@@ -48,39 +51,83 @@ public partial class VolumeMixerViewModel : ObservableObject, IDisposable
 
         _pollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1000) };
         _pollTimer.Tick += OnPollTick;
+    }
+
+    public void StartPolling()
+    {
+        if (_disposed || _pollTimer == null || _pollTimer.IsEnabled) return;
         _pollTimer.Start();
+    }
+
+    public void StopPolling()
+    {
+        if (_pollTimer != null && _pollTimer.IsEnabled)
+            _pollTimer.Stop();
     }
 
     partial void OnIsExpandedChanged(bool oldValue, bool newValue)
     {
-        if (oldValue == newValue) return;
+        if (oldValue == newValue || !newValue) return;
         RefreshSessions();
     }
 
     private void AttachDevice(MMDevice? device)
     {
-        _device = device;
+        if (_disposed)
+        {
+            device?.Dispose();
+            return;
+        }
+
+        if (!ReferenceEquals(_device, device))
+        {
+            _device?.Dispose();
+            _device = device;
+        }
 
         if (_device == null)
         {
-            DeviceName = string.Empty;
-            MasterVolume = 0f;
-            IsMasterMuted = false;
+            _syncingFromDevice = true;
+            try
+            {
+                DeviceName = string.Empty;
+                MasterVolume = 0f;
+                IsMasterMuted = false;
+            }
+            finally
+            {
+                _syncingFromDevice = false;
+            }
             ClearSessions();
             return;
         }
 
-        DeviceName = _device.FriendlyName;
+        try
+        {
+            DeviceName = _device.FriendlyName;
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn(ex, "Failed to read audio device friendly name");
+            DeviceName = string.Empty;
+        }
+
         SyncMasterFromDevice();
         RefreshSessions();
     }
 
     private void OnDefaultDeviceChanged(object? sender, DefaultDeviceChangedEventArgs e)
     {
+        if (_disposed) return;
+
         Logger.Info("Default render device changed, reattaching volume mixer");
 
-        System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher == null || dispatcher.HasShutdownStarted) return;
+
+        dispatcher.InvokeAsync(() =>
         {
+            if (_disposed) return;
             AttachDevice(AudioDeviceMonitor.Instance.GetDeviceById(e.DeviceId));
         });
     }
@@ -93,7 +140,10 @@ public partial class VolumeMixerViewModel : ObservableObject, IDisposable
     private void ClearSessions()
     {
         foreach (var session in Sessions)
+        {
             session.VolumeChanged -= OnSessionVolumeChanged;
+            session.Dispose();
+        }
 
         Sessions.Clear();
     }
@@ -107,22 +157,31 @@ public partial class VolumeMixerViewModel : ObservableObject, IDisposable
 
     partial void OnMasterVolumeChanged(float value)
     {
-        if (_device == null) return;
-        _device.AudioEndpointVolume.MasterVolumeLevelScalar = Math.Clamp(value, 0f, 1f);
-        if (MasterVolume == 0f)
+        if (_syncingFromDevice || _disposed || _device == null) return;
+
+        try
         {
-            IsMasterMuted = true;
+            _device.AudioEndpointVolume.MasterVolumeLevelScalar = Math.Clamp(value, 0f, 1f);
+            IsMasterMuted = value == 0f;
         }
-        else
+        catch (Exception ex)
         {
-            IsMasterMuted = false;
+            Logger.Debug(ex, "Failed to update master volume");
         }
     }
 
     partial void OnIsMasterMutedChanged(bool value)
     {
-        if (_device == null) return;
-        _device.AudioEndpointVolume.Mute = value;
+        if (_syncingFromDevice || _disposed || _device == null) return;
+
+        try
+        {
+            _device.AudioEndpointVolume.Mute = value;
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed to update master mute state");
+        }
     }
 
     public bool TryAdjustMasterVolume(float delta)
@@ -176,16 +235,31 @@ public partial class VolumeMixerViewModel : ObservableObject, IDisposable
 
     public void SyncMasterFromDevice()
     {
-        if (_device == null) return;
+        if (_disposed || _device == null) return;
 
-        var vol = _device.AudioEndpointVolume.MasterVolumeLevelScalar;
-        var mute = _device.AudioEndpointVolume.Mute;
+        try
+        {
+            var vol = _device.AudioEndpointVolume.MasterVolumeLevelScalar;
+            var mute = _device.AudioEndpointVolume.Mute;
 
-        if (MathF.Abs(MasterVolume - vol) > 0.001f)
-            MasterVolume = vol;
+            _syncingFromDevice = true;
+            try
+            {
+                if (MathF.Abs(MasterVolume - vol) > 0.001f)
+                    MasterVolume = vol;
 
-        if (IsMasterMuted != mute)
-            IsMasterMuted = mute;
+                if (IsMasterMuted != mute)
+                    IsMasterMuted = mute;
+            }
+            finally
+            {
+                _syncingFromDevice = false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed to sync master volume from device");
+        }
     }
 
 
@@ -194,37 +268,54 @@ public partial class VolumeMixerViewModel : ObservableObject, IDisposable
     {
         ClearSessions();
 
-        if (_device == null)
+        if (_disposed || _device == null)
             return;
 
+        MMDevice? updatedDevice = null;
         try
         {
             // update device reference because previous _device doesn't have updated sessions
-            var updatedDevice = AudioDeviceMonitor.Instance.GetDeviceById(_device.ID) ?? _device;
-            var sessionManager = updatedDevice.AudioSessionManager;
+            updatedDevice = AudioDeviceMonitor.Instance.GetDeviceById(_device.ID);
+            var deviceForSessions = updatedDevice ?? _device;
+            var sessionManager = deviceForSessions.AudioSessionManager;
             var sessions = sessionManager.Sessions;
 
             for (int i = 0; i < sessions.Count; i++)
             {
                 var session = sessions[i];
-                AudioSessionState sessionState = session.State;
-                if (sessionState == AudioSessionState.AudioSessionStateExpired) continue;
+                bool ownershipTransferred = false;
+                try
+                {
+                    AudioSessionState sessionState = session.State;
+                    if (sessionState == AudioSessionState.AudioSessionStateExpired) continue;
 
-                int pid = (int)session.GetProcessID;
+                    int pid = (int)session.GetProcessID;
 
-                string name = pid != 0 ? GetSessionDisplayName(session) : "System sounds";
+                    string name = pid != 0 ? GetSessionDisplayName(session) : "System sounds";
 
-                if (name == "FluentFlyout") continue;
+                    if (name == "FluentFlyout") continue;
 
-                var icon = MediaPlayerData.GetAndCacheProcessIcon(pid, name);
-                var audioSession = new AudioSessionModel(session, name, pid, sessionState, icon);
-                audioSession.VolumeChanged += OnSessionVolumeChanged;
-                Sessions.Add(audioSession);
+                    var icon = MediaPlayerData.GetAndCacheProcessIcon(pid, name);
+                    var audioSession = new AudioSessionModel(session, name, pid, sessionState, icon);
+                    audioSession.VolumeChanged += OnSessionVolumeChanged;
+                    Sessions.Add(audioSession);
+                    ownershipTransferred = true;
+                }
+                finally
+                {
+                    if (!ownershipTransferred)
+                        session.Dispose();
+                }
             }
         }
         catch (Exception ex)
         {
             Logger.Error(ex, "Failed to enumerate audio sessions");
+        }
+        finally
+        {
+            if (updatedDevice != null && !ReferenceEquals(updatedDevice, _device))
+                updatedDevice.Dispose();
         }
     }
 
@@ -238,21 +329,21 @@ public partial class VolumeMixerViewModel : ObservableObject, IDisposable
             uint pid = session.GetProcessID;
             if (pid != 0)
             {
-                var process = Process.GetProcessById((int)pid);
-                var mainModule = process.MainModule;
-
-                if (mainModule != null)
+                using var process = Process.GetProcessById((int)pid);
+                try
                 {
-                    return !string.IsNullOrWhiteSpace(mainModule.FileVersionInfo.FileDescription)
-                    ? mainModule.FileVersionInfo.FileDescription
-                    : process.MainWindowTitle;
+                    var mainModule = process.MainModule;
+                    if (mainModule != null && !string.IsNullOrWhiteSpace(mainModule.FileVersionInfo.FileDescription))
+                        return mainModule.FileVersionInfo.FileDescription;
                 }
-                else
+                catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or NotSupportedException)
                 {
-                    return process.MainWindowTitle is { Length: > 0 } title
+                    // Protected/elevated processes deny MainModule access; fall back to window title or process name
+                }
+
+                return process.MainWindowTitle is { Length: > 0 } title
                     ? title
                     : process.ProcessName;
-                }
             }
         }
         catch
@@ -266,19 +357,31 @@ public partial class VolumeMixerViewModel : ObservableObject, IDisposable
 
     public void OnPollTick(object? sender, EventArgs e)
     {
-        SyncMasterFromDevice();
+        if (_disposed) return;
 
-        foreach (var session in Sessions)
+        try
         {
-            session.SyncFromDevice();
-            //Logger.Trace("Session '{0}' (PID {1}) - Volume: {2}, Muted: {3}, State: {4}",
-            //    session.DisplayName, session.ProcessId, session.Volume, session.IsMuted, session.State);
+            SyncMasterFromDevice();
+
+            foreach (var session in Sessions)
+            {
+                session.SyncFromDevice();
+                //Logger.Trace("Session '{0}' (PID {1}) - Volume: {2}, Muted: {3}, State: {4}",
+                //    session.DisplayName, session.ProcessId, session.Volume, session.IsMuted, session.State);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Failed during volume mixer poll tick");
         }
     }
 
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+
         if (_pollTimer != null)
         {
             _pollTimer.Tick -= OnPollTick;
@@ -289,6 +392,8 @@ public partial class VolumeMixerViewModel : ObservableObject, IDisposable
         AudioDeviceMonitor.Instance.DefaultDeviceChanged -= OnDefaultDeviceChanged;
 
         ClearSessions();
+        _device?.Dispose();
+        _device = null;
 
         GC.SuppressFinalize(this);
     }

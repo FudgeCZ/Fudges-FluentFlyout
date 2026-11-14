@@ -69,71 +69,86 @@ public class SettingsManager
     /// Restores the settings `SettingsManager.Current` from the settings file.
     /// </summary>
     /// <returns>The restored settings.</returns>
-    public static UserSettings RestoreSettings(string? filePath = null)
+    public static UserSettings RestoreSettings(string? filePath = null, bool throwOnError = false)
     {
         bool isImport = filePath != null;
         filePath ??= SettingsFilePath;
         string backupPath = filePath + ".bak";
 
-        try
+        lock (SettingsFileLock)
         {
-            if (DeserializeSettings(filePath, out var loadedSettings) && loadedSettings != null)
+            try
             {
-                if (isImport && _current != null)
+                if (DeserializeSettings(filePath, out var loadedSettings) && loadedSettings != null)
                 {
-                    loadedSettings.Uuid = _current.Uuid;
-                    loadedSettings.IsStoreVersion = _current.IsStoreVersion;
+                    if (isImport && _current != null)
+                    {
+                        loadedSettings.Uuid = _current.Uuid;
+                        loadedSettings.IsStoreVersion = _current.IsStoreVersion;
+                    }
+
+                    _current = loadedSettings;
+                    _current.CompleteInitialization();
+
+                    Logger.Info("Settings successfully restored");
+                    return _current;
                 }
 
-                _current = loadedSettings;
-                _current.CompleteInitialization();
-
-                Logger.Info("Settings successfully restored");
-                return _current;
+                if (throwOnError)
+                {
+                    throw new InvalidDataException($"Settings file could not be loaded: {filePath}");
+                }
             }
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            Logger.Error(ex, "No permission to read in settings file");
-        }
-        catch (Exception ex)
-        {
-            Logger.Error(ex, "Error restoring settings");
-        }
-
-        // try restoring backup (version before the last save)
-        try
-        {
-            if (DeserializeSettings(backupPath, out var backupSettings) && backupSettings != null)
+            catch (UnauthorizedAccessException ex)
             {
-                _current = backupSettings;
-                _current.CompleteInitialization();
-
-                Logger.Warn("Could not restore primary settings file, restored settings from backup");
-                return _current;
+                Logger.Error(ex, "No permission to read in settings file");
+                if (throwOnError) throw;
             }
-        }
-        catch (Exception backupEx)
-        {
-            Logger.Error(backupEx, "Error restoring settings from backup file");
-        }
+            catch (Exception ex)
+            {
+                Logger.Error(ex, "Error restoring settings");
+                if (throwOnError) throw;
+            }
 
-        // if the settings/backup file not found or cannot be read
-        Logger.Warn("Settings & backup file not found or cannot be read, loading default settings");
-        _current = new UserSettings();
-        _current.CompleteInitialization();
-        return _current;
+            // try restoring backup (version before the last save)
+            try
+            {
+                if (DeserializeSettings(backupPath, out var backupSettings) && backupSettings != null)
+                {
+                    _current = backupSettings;
+                    _current.CompleteInitialization();
+
+                    Logger.Warn("Could not restore primary settings file, restored settings from backup");
+                    return _current;
+                }
+            }
+            catch (Exception backupEx)
+            {
+                Logger.Error(backupEx, "Error restoring settings from backup file");
+            }
+
+            // if the settings/backup file not found or cannot be read
+            Logger.Warn("Settings & backup file not found or cannot be read, loading default settings");
+            _current = new UserSettings();
+            _current.CompleteInitialization();
+            return _current;
+        }
     }
 
     /// <summary>
     /// Saves the app settings to the settings file.
     /// </summary>
-    public static void SaveSettings(string? filePath = null)
+    public static void SaveSettings(string? filePath = null, bool throwOnError = false)
     {
         bool isExport = filePath != null;
         filePath ??= SettingsFilePath;
         string tempPath = filePath + ".tmp";
         string backupPath = filePath + ".bak";
+
+        if (!isExport)
+        {
+            _current?.CancelPendingSave();
+        }
 
         try
         {
@@ -147,49 +162,36 @@ public class SettingsManager
 
                 _current ??= new UserSettings();
 
-                using (var writer = new StreamWriter(tempPath, false))
+                try
                 {
-                    XmlSerializer xmlSerializer;
-                    if (isExport)
+                    using (var writer = new StreamWriter(tempPath, false))
                     {
-                        xmlSerializer = GetExportSerializer();
+                        XmlSerializer xmlSerializer;
+                        if (isExport)
+                        {
+                            xmlSerializer = GetExportSerializer();
+                        }
+                        else
+                        {
+                            xmlSerializer = new XmlSerializer(typeof(UserSettings));
+                        }
+                        xmlSerializer.Serialize(writer, _current);
+                    }
+
+                    if (File.Exists(filePath))
+                    {
+                        TryReplaceSettingsFile(filePath, tempPath, backupPath);
                     }
                     else
                     {
-                        xmlSerializer = new XmlSerializer(typeof(UserSettings));
-                    }
-                    xmlSerializer.Serialize(writer, _current);
-                }
-
-                if (File.Exists(filePath))
-                    _ = Task.Run(async () =>
-                    {
-                        // Run asynchronously to avoid blocking the UI thread
-                        try
-                        {
-                            await TryReplaceSettingsFileAsync(filePath, tempPath, backupPath);
-                            Logger.Info("Settings successfully saved to {0}", filePath);
-                        }
-                        catch (Exception ex)
-                        {
-                            Logger.Error(ex, "Error replacing settings file");
-                        }
-                        finally
-                        {
-                            TryDeleteFileIfExists(tempPath);
-                        }
-                    });
-                else
-                {
-                    try
-                    {
                         File.Move(tempPath, filePath, true);
-                        Logger.Info("Settings successfully saved to {0}", filePath);
                     }
-                    finally
-                    {
-                        TryDeleteFileIfExists(tempPath);
-                    }
+
+                    Logger.Info("Settings successfully saved to {0}", filePath);
+                }
+                finally
+                {
+                    TryDeleteFileIfExists(tempPath);
                 }
             }
         }
@@ -197,15 +199,17 @@ public class SettingsManager
         {
             // if the app doesn't have permission to write to the settings file
             Logger.Error(ex, "No permission to write in settings file");
+            if (throwOnError) throw;
         }
         catch (Exception ex)
         {
             // if the settings file cannot be saved
             Logger.Error(ex, "Error saving settings");
+            if (throwOnError) throw;
         }
     }
 
-    private async static Task TryReplaceSettingsFileAsync(string filePath, string tempPath, string backupPath)
+    private static void TryReplaceSettingsFile(string filePath, string tempPath, string backupPath)
     {
         Logger.Debug("Initializing replacing settings file at {0}", filePath);
         int maxAttempts = 5;
@@ -235,9 +239,8 @@ public class SettingsManager
     private static void ManualReplace(string filePath, string tempPath, string backupPath)
     {
         TryDeleteFileIfExists(backupPath);
-        File.Copy(filePath, backupPath);
-        TryDeleteFileIfExists(filePath);
-        File.Move(tempPath, filePath);
+        File.Copy(filePath, backupPath, overwrite: true);
+        File.Move(tempPath, filePath, overwrite: true);
     }
 
     private static void TryDeleteFileIfExists(string path)

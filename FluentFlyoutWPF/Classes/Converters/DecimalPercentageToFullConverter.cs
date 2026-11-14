@@ -11,23 +11,50 @@ public class DecimalPercentageToFullConverter : IValueConverter
     // Convert decimal percentage (0.5) to full percentage (50)
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
     {
-        if (value == null) return 0;
-        if (value is float floatValue)
+        if (TryToDouble(value, out double number))
         {
-            return (int)Math.Round(floatValue * 100);
+            return (int)Math.Round(number * 100);
         }
-        else
-        {
-            return 0;
-        }
+
+        return 0;
     }
 
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
     {
-        if (value is float floatValue)
+        if (!TryToDouble(value, out double number))
         {
-            return floatValue / 100;
+            return 0f;
         }
-        return 0;
+
+        double normalized = number / 100.0;
+        if (targetType == typeof(double))
+            return normalized;
+        if (targetType == typeof(decimal))
+            return (decimal)normalized;
+        if (targetType == typeof(int))
+            return (int)Math.Round(normalized);
+        return (float)normalized;
+    }
+
+    private static bool TryToDouble(object? value, out double result)
+    {
+        switch (value)
+        {
+            case float f:
+                result = f;
+                return true;
+            case double d:
+                result = d;
+                return true;
+            case int i:
+                result = i;
+                return true;
+            case decimal m:
+                result = (double)m;
+                return true;
+            default:
+                result = 0;
+                return false;
+        }
     }
 }

@@ -21,8 +21,11 @@ public partial class SystemPage : Page
     {
         InitializeComponent();
         DataContext = SettingsManager.Current;
-        UpdateMonitorList();
-        Loaded += (_, _) => RefreshPriorityItems();
+        Loaded += (_, _) =>
+        {
+            UpdateMonitorList();
+            RefreshPriorityItems();
+        };
     }
 
     /// <summary>
@@ -33,14 +36,14 @@ public partial class SystemPage : Page
     {
         var items = new List<string> { "(none)" };
 
-        var mainWindow = Application.Current.MainWindow as MainWindow;
+        var mainWindow = Application.Current?.MainWindow as MainWindow;
         if (mainWindow?.mediaManager != null)
         {
             items.AddRange(mainWindow.mediaManager.CurrentMediaSessions.Values
                 .Select(s => MediaPlayerData.GetAndCacheMediaPlayerData(s.Id).Item1)
                 .Where(n => !string.IsNullOrWhiteSpace(n))
-                .Distinct()
-                .OrderBy(n => n));
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase));
         }
 
         var current = SettingsManager.Current.MediaSessionPriorityApp;
@@ -49,7 +52,9 @@ public partial class SystemPage : Page
 
         PriorityComboBox.SelectedItem = null;
         PriorityComboBox.ItemsSource = items;
-        PriorityComboBox.SelectedItem = string.IsNullOrWhiteSpace(current) ? "(none)" : current;
+        PriorityComboBox.SelectedItem = string.IsNullOrWhiteSpace(current)
+            ? "(none)"
+            : items.FirstOrDefault(i => i.Equals(current, StringComparison.OrdinalIgnoreCase)) ?? current;
     }
 
     private void PriorityComboBox_DropDownOpened(object sender, EventArgs e)
@@ -122,9 +127,10 @@ public partial class SystemPage : Page
 
     private void ToggleSwitch_Click(object sender, RoutedEventArgs e)
     {
-        bool isChecked = (bool)NIconHideSwitch.IsChecked;
+        bool isChecked = NIconHideSwitch.IsChecked == true;
 
-        MainWindow mainWindow = (MainWindow)Application.Current.MainWindow;
+        if (Application.Current?.MainWindow is not MainWindow mainWindow)
+            return;
 
         if (!isChecked)
         {
@@ -158,16 +164,16 @@ public partial class SystemPage : Page
         {
             try
             {
-                SettingsManager.SaveSettings(saveFileDialog.FileName);
+                SettingsManager.SaveSettings(saveFileDialog.FileName, throwOnError: true);
 
                 Wpf.Ui.Controls.MessageBox messageBox = new()
                 {
-                    Title = Application.Current.FindResource("ExportSuccessful").ToString(),
-                    Content = Application.Current.FindResource("SettingsExportedSuccessfully").ToString(),
+                    Title = Application.Current?.TryFindResource("ExportSuccessful")?.ToString() ?? "Export Successful",
+                    Content = Application.Current?.TryFindResource("SettingsExportedSuccessfully")?.ToString() ?? "Settings exported successfully.",
                     CloseButtonText = "OK",
                 };
 
-                _ = messageBox.ShowDialogAsync();
+                await messageBox.ShowDialogAsync();
             }
             catch (Exception ex)
             {
@@ -175,12 +181,12 @@ public partial class SystemPage : Page
 
                 Wpf.Ui.Controls.MessageBox messageBox = new()
                 {
-                    Title = Application.Current.FindResource("ExportFailed").ToString(),
-                    Content = Application.Current.FindResource("FailedToExportSettings").ToString(),
+                    Title = Application.Current?.TryFindResource("ExportFailed")?.ToString() ?? "Export Failed",
+                    Content = Application.Current?.TryFindResource("FailedToExportSettings")?.ToString() ?? "Failed to export settings.",
                     CloseButtonText = "OK",
                 };
 
-                _ = messageBox.ShowDialogAsync();
+                await messageBox.ShowDialogAsync();
             }
         }
     }
@@ -197,8 +203,8 @@ public partial class SystemPage : Page
         {
             Wpf.Ui.Controls.MessageBox confirmBox = new()
             {
-                Title = Application.Current.FindResource("ImportSettings").ToString(),
-                Content = Application.Current.FindResource("ImportSettingsWarning").ToString(),
+                Title = Application.Current?.TryFindResource("ImportSettings")?.ToString() ?? "Import Settings",
+                Content = Application.Current?.TryFindResource("ImportSettingsWarning")?.ToString() ?? "Importing settings will overwrite your current configuration and restart the application. Continue?",
                 CloseButtonText = "No",
                 SecondaryButtonText = "Yes",
             };
@@ -209,21 +215,37 @@ public partial class SystemPage : Page
             {
                 try
                 {
-                    SettingsManager.RestoreSettings(openFileDialog.FileName);
-                    SettingsManager.SaveSettings();
+                    SettingsManager.RestoreSettings(openFileDialog.FileName, throwOnError: true);
+                    SettingsManager.SaveSettings(throwOnError: true);
 
                     Wpf.Ui.Controls.MessageBox messageBox = new()
                     {
-                        Title = Application.Current.FindResource("ImportSuccessful").ToString(),
-                        Content = Application.Current.FindResource("SettingsImportedSuccessfully").ToString(),
+                        Title = Application.Current?.TryFindResource("ImportSuccessful")?.ToString() ?? "Import Successful",
+                        Content = Application.Current?.TryFindResource("SettingsImportedSuccessfully")?.ToString() ?? "Settings imported successfully.",
                         CloseButtonText = "OK",
                     };
 
-                    _ = messageBox.ShowDialogAsync();
+                    await messageBox.ShowDialogAsync();
 
-                    // Restart the application
-                    Application.Current.Shutdown();
-                    System.Diagnostics.Process.Start(System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName);
+                    // Launch a detached helper that waits for this process (and its single-instance Mutex) to exit before restarting
+                    using (var currentProcess = Process.GetCurrentProcess())
+                    {
+                        string? exePath = Environment.ProcessPath ?? currentProcess.MainModule?.FileName;
+                        if (!string.IsNullOrEmpty(exePath))
+                        {
+                            string escapedExe = exePath.Replace("'", "''");
+                            string psCommand = $"Wait-Process -Id {currentProcess.Id} -Timeout 30 -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 300; Start-Process -FilePath '{escapedExe}'";
+                            using var helper = Process.Start(new ProcessStartInfo
+                            {
+                                FileName = "powershell.exe",
+                                Arguments = $"-NoProfile -WindowStyle Hidden -Command \"{psCommand}\"",
+                                UseShellExecute = false,
+                                CreateNoWindow = true,
+                            });
+                        }
+                    }
+
+                    Application.Current?.Shutdown();
                 }
                 catch (Exception ex)
                 {
@@ -231,12 +253,12 @@ public partial class SystemPage : Page
 
                     Wpf.Ui.Controls.MessageBox messageBox = new()
                     {
-                        Title = Application.Current.FindResource("ImportFailed").ToString(),
-                        Content = Application.Current.FindResource("FailedToImportSettings").ToString(),
+                        Title = Application.Current?.TryFindResource("ImportFailed")?.ToString() ?? "Import Failed",
+                        Content = Application.Current?.TryFindResource("FailedToImportSettings")?.ToString() ?? "Failed to import settings.",
                         CloseButtonText = "OK",
                     };
 
-                    _ = messageBox.ShowDialogAsync();
+                    await messageBox.ShowDialogAsync();
                 }
             }
         }

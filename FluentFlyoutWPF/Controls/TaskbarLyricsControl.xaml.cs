@@ -22,6 +22,8 @@ namespace FluentFlyout.Controls;
 /// </summary>
 public partial class TaskbarLyricsControl : UserControl
 {
+    private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
+
     private const double SmallTaskbarLyricsHeight = 28;
     private const double DefaultTaskbarLyricsHeight = 40;
     private const double LineGap = 7;
@@ -65,7 +67,7 @@ public partial class TaskbarLyricsControl : UserControl
     internal MonitorTaskbarSettings Settings { get; private set; } = new();
 
     /// <summary>Whether the control currently has lyrics (or a search in progress) to display.</summary>
-    public bool HasContent => Root.Visibility == Visibility.Visible && (_lines.Count > 0 || _loadingVisible);
+    public new bool HasContent => Root.Visibility == Visibility.Visible && (_lines.Count > 0 || _loadingVisible);
 
     /// <summary>Raised after content appears or disappears (taskbar window region must be updated).</summary>
     public event Action? ContentChanged;
@@ -77,16 +79,11 @@ public partial class TaskbarLyricsControl : UserControl
         SetSmallTaskbarMode(false);
 
         BindMonitorSettings(SettingsManager.Current.GetMonitorSettings(0));
-        Unloaded += (_, _) => Settings.PropertyChanged -= Settings_PropertyChanged;
+        SubscribeLyricsService();
 
-        LyricsService.Instance.LyricsChanged += OnLyricsServiceChanged;
-        Unloaded += (_, _) => LyricsService.Instance.LyricsChanged -= OnLyricsServiceChanged;
-
-        LyricsService.Instance.TrackDisabledStateChanged += OnTrackDisabledStateChanged;
-        Unloaded += (_, _) => LyricsService.Instance.TrackDisabledStateChanged -= OnTrackDisabledStateChanged;
-
-        LyricsService.Instance.TrackOffsetChanged += OnTrackOffsetChanged;
-        Unloaded += (_, _) => LyricsService.Instance.TrackOffsetChanged -= OnTrackOffsetChanged;
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
+        SizeChanged += OnControlSizeChanged;
 
         _tickTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
         _tickTimer.Tick += (_, _) => TickScroll();
@@ -123,6 +120,55 @@ public partial class TaskbarLyricsControl : UserControl
         };
     }
 
+    private void SubscribeLyricsService()
+    {
+        LyricsService.Instance.LyricsChanged -= OnLyricsServiceChanged;
+        LyricsService.Instance.LyricsChanged += OnLyricsServiceChanged;
+        LyricsService.Instance.TrackDisabledStateChanged -= OnTrackDisabledStateChanged;
+        LyricsService.Instance.TrackDisabledStateChanged += OnTrackDisabledStateChanged;
+        LyricsService.Instance.TrackOffsetChanged -= OnTrackOffsetChanged;
+        LyricsService.Instance.TrackOffsetChanged += OnTrackOffsetChanged;
+    }
+
+    private void UnsubscribeLyricsService()
+    {
+        LyricsService.Instance.LyricsChanged -= OnLyricsServiceChanged;
+        LyricsService.Instance.TrackDisabledStateChanged -= OnTrackDisabledStateChanged;
+        LyricsService.Instance.TrackOffsetChanged -= OnTrackOffsetChanged;
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        Settings.PropertyChanged -= Settings_PropertyChanged;
+        Settings.PropertyChanged += Settings_PropertyChanged;
+        SubscribeLyricsService();
+
+        if (_lines.Count > 0 && Settings.TaskbarWidgetEnabled && Settings.LyricsEnabled && Root.Visibility == Visibility.Visible)
+        {
+            if (!_tickTimer.IsEnabled)
+                _tickTimer.Start();
+            AnimateToLine(_activeLine);
+        }
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        Settings.PropertyChanged -= Settings_PropertyChanged;
+        UnsubscribeLyricsService();
+        _tickTimer.Stop();
+        _loadingShowTimer.Stop();
+        _loadingDotsTimer.Stop();
+        _offsetHintTimer?.Stop();
+    }
+
+    private void OnControlSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (e.HeightChanged && _lines.Count > 0 && Root.Visibility == Visibility.Visible)
+        {
+            AnimateToLine(_activeLine);
+        }
+    }
+
     public void BindMonitorSettings(MonitorTaskbarSettings settings)
     {
         Settings.PropertyChanged -= Settings_PropertyChanged;
@@ -131,7 +177,10 @@ public partial class TaskbarLyricsControl : UserControl
         Settings.PropertyChanged += Settings_PropertyChanged;
 
         Width = Math.Clamp(Settings.LyricsWidth, 120, 400);
-        ApplyWidthFromSetting();
+        if (!Settings.TaskbarWidgetEnabled || !Settings.LyricsEnabled)
+            Clear();
+        else
+            ApplyWidthFromSetting();
     }
 
     private void ShowLoading()
@@ -139,6 +188,7 @@ public partial class TaskbarLyricsControl : UserControl
         if (!_awaitingResult)
             return;
 
+        _offsetHintTimer?.Stop();
         _loadingVisible = true;
         LoadingText.Foreground = GetTextBrush();
         LoadingText.Text = "searching lyrics·";
@@ -157,9 +207,10 @@ public partial class TaskbarLyricsControl : UserControl
     {
         _loadingShowTimer.Stop();
         _loadingDotsTimer.Stop();
-        LoadingText.Visibility = Visibility.Collapsed;
         bool was = _loadingVisible;
         _loadingVisible = false;
+        if (was || _offsetHintTimer?.IsEnabled != true)
+            LoadingText.Visibility = Visibility.Collapsed;
         if (was)
             ContentChanged?.Invoke();
     }
@@ -170,9 +221,10 @@ public partial class TaskbarLyricsControl : UserControl
         {
             ApplyWidthFromSetting();
         }
-        else if (e.PropertyName == nameof(MonitorTaskbarSettings.LyricsEnabled))
+        else if (e.PropertyName is nameof(MonitorTaskbarSettings.LyricsEnabled)
+            or nameof(MonitorTaskbarSettings.TaskbarWidgetEnabled))
         {
-            if (Settings.LyricsEnabled)
+            if (Settings.TaskbarWidgetEnabled && Settings.LyricsEnabled)
                 SetTrack(_lastArtist, _lastTitle, _lastDuration); // re-fetch, nulls clear
             else
                 Clear();
@@ -188,7 +240,8 @@ public partial class TaskbarLyricsControl : UserControl
         _lastTitle = title;
         _lastDuration = duration;
 
-        if (!Settings.LyricsEnabled ||
+        if (!Settings.TaskbarWidgetEnabled ||
+            !Settings.LyricsEnabled ||
             string.IsNullOrWhiteSpace(artist) ||
             string.IsNullOrWhiteSpace(title) ||
             LyricsService.Instance.IsTrackDisabled(artist, title))
@@ -238,6 +291,12 @@ public partial class TaskbarLyricsControl : UserControl
     /// </summary>
     public void SetClock(TimeSpan position, DateTime lastUpdated, bool playing)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(() => SetClock(position, lastUpdated, playing));
+            return;
+        }
+
         _basePosition = position;
         _baseUpdated = lastUpdated;
 
@@ -248,7 +307,7 @@ public partial class TaskbarLyricsControl : UserControl
             return;
         }
 
-        NLog.LogManager.GetCurrentClassLogger().Info(
+        Logger.Info(
             "Lyrics SetClock: playing {0} -> {1}, hiddenByPause={2}, lines={3}",
             _playing, playing, _hiddenByPause, _lines.Count);
         _playing = playing;
@@ -266,7 +325,7 @@ public partial class TaskbarLyricsControl : UserControl
 
     private void OnLyricsServiceChanged()
     {
-        if (!Settings.LyricsEnabled)
+        if (!Settings.TaskbarWidgetEnabled || !Settings.LyricsEnabled)
         {
             Clear();
             return;
@@ -283,7 +342,7 @@ public partial class TaskbarLyricsControl : UserControl
         {
             Clear();
         }
-        else if (Settings.LyricsEnabled && !HasContent && !_awaitingResult)
+        else if (Settings.TaskbarWidgetEnabled && Settings.LyricsEnabled && !HasContent && !_awaitingResult)
         {
             SetTrack(_lastArtist, _lastTitle, _lastDuration);
         }
@@ -314,7 +373,7 @@ public partial class TaskbarLyricsControl : UserControl
         _pausedSince = null;
         _hiddenByPause = false;
 
-        if (!Settings.LyricsEnabled || result == null || result.Lines.Count == 0)
+        if (!Settings.TaskbarWidgetEnabled || !Settings.LyricsEnabled || result == null || result.Lines.Count == 0)
         {
             Clear();
             return;
@@ -402,7 +461,7 @@ public partial class TaskbarLyricsControl : UserControl
         if (!original.Contains(' ') || ContentWidth < 40)
             return;
 
-        double rowHeight = MeasureRowHeight();
+        double rowHeight = MeasureRowHeight(tb.FontFamily);
         if (rowHeight <= 1)
             return;
 
@@ -509,9 +568,9 @@ public partial class TaskbarLyricsControl : UserControl
         RelayoutCore();
     }
 
-    private double MeasureRowHeight()
+    private double MeasureRowHeight(FontFamily fontFamily)
     {
-        var probe = new TextBlock { Text = "Xg", FontSize = 12 };
+        var probe = new TextBlock { Text = "Xg", FontSize = 12, FontFamily = fontFamily };
         probe.Measure(new Size(1000, double.PositiveInfinity));
         return Math.Max(1, probe.DesiredSize.Height);
     }
@@ -532,8 +591,19 @@ public partial class TaskbarLyricsControl : UserControl
             y += tb.DesiredSize.Height + LineGap;
         }
 
-        ScrollTransform.Y = 0;
-        _activeLine = -1;
+        if (_lines.Count > 0 && _activeLine >= 0 && _activeLine < _lines.Count)
+        {
+            double viewHeight = GetEffectiveViewHeight();
+            double target = viewHeight * AnchorFraction - (_lines[_activeLine].Y + _lines[_activeLine].Height / 2);
+            ScrollTransform.BeginAnimation(TranslateTransform.YProperty, null);
+            ScrollTransform.Y = target;
+        }
+        else if (_activeLine < 0 && _lines.Count > 0)
+        {
+            double viewHeight = GetEffectiveViewHeight();
+            ScrollTransform.BeginAnimation(TranslateTransform.YProperty, null);
+            ScrollTransform.Y = viewHeight * AnchorFraction;
+        }
     }
 
     public void Clear()
@@ -593,7 +663,7 @@ public partial class TaskbarLyricsControl : UserControl
     /// <summary>Mouse wheel over the widget nudges this track's sync offset (±100 ms).</summary>
     private void LyricsControl_MouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
     {
-        if (_lastArtist == null || _lastTitle == null || !HasContent)
+        if (_lastArtist == null || _lastTitle == null || _loadingVisible || _lines.Count == 0 || Root.Visibility != Visibility.Visible)
             return;
 
         int step = e.Delta > 0 ? 100 : -100;
@@ -654,7 +724,7 @@ public partial class TaskbarLyricsControl : UserControl
 
     private void HideForPause()
     {
-        NLog.LogManager.GetCurrentClassLogger().Info("Lyrics HideForPause");
+        Logger.Info("Lyrics HideForPause");
         _hiddenByPause = true;
         int gen = _generation;
         var fade = new DoubleAnimation(0, FadeDuration);
@@ -671,7 +741,7 @@ public partial class TaskbarLyricsControl : UserControl
 
     private void ShowFromPause()
     {
-        NLog.LogManager.GetCurrentClassLogger().Info("Lyrics ShowFromPause");
+        Logger.Info("Lyrics ShowFromPause");
         _hiddenByPause = false;
         _pausedSince = _playing ? null : _pausedSince;
         Root.BeginAnimation(OpacityProperty, null);
@@ -684,13 +754,21 @@ public partial class TaskbarLyricsControl : UserControl
         ContentChanged?.Invoke();
     }
 
+    private double GetEffectiveViewHeight()
+    {
+        if (ActualHeight > 0)
+            return ActualHeight;
+        return !double.IsNaN(Height) && Height > 0 ? Height : DefaultTaskbarLyricsHeight;
+    }
+
     /// <summary>Eased scroll to a line + highlight pop on it, dimming the rest.</summary>
     private void AnimateToLine(int index)
     {
+        double viewHeight = GetEffectiveViewHeight();
         // scroll: bring the line's center to the anchor point
-        double target = index < 0
-            ? ActualHeight * AnchorFraction // before the first line: first line sits at the anchor
-            : ActualHeight * AnchorFraction - (_lines[index].Y + _lines[index].Height / 2);
+        double target = index < 0 || index >= _lines.Count
+            ? viewHeight * AnchorFraction // before the first line: first line sits at the anchor
+            : viewHeight * AnchorFraction - (_lines[index].Y + _lines[index].Height / 2);
         ScrollTransform.BeginAnimation(TranslateTransform.YProperty,
             new DoubleAnimation(target, ScrollDuration) { EasingFunction = EaseOut() });
 

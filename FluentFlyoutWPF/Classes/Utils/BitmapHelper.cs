@@ -91,11 +91,11 @@ internal static class BitmapHelper
     // cached thumbnails to prevent reprocessing
     private static readonly LruCache<int, BitmapImage> _thumbnailCache = new(_cacheEntryLimit);
 
-    // cached bitmapImage hashes and their dominant colors
-    private static readonly LruCache<int, List<SolidColorBrush>> _dominantColorsCache = new(_cacheEntryLimit);
+    // cached bitmapImage hashes + theme flag and their dominant colors
+    private static readonly LruCache<(int HashCode, bool IsDarkTheme), List<SolidColorBrush>> _dominantColorsCache = new(_cacheEntryLimit);
 
-    private static int _currentHashCode = 0;
-    private static readonly AsyncLocal<int> _currentHashCodeContext = new();
+    private static int? _currentHashCode;
+    private static readonly AsyncLocal<int?> _currentHashCodeContext = new();
 
     // current or latest dominant colors
     private static List<SolidColorBrush>? _currentDominantColors;
@@ -127,12 +127,13 @@ internal static class BitmapHelper
     internal static BitmapImage? GetThumbnail(IRandomAccessStreamReference? thumbnail, int maxThumbnailSize = _maxThumbnailSize)
     {
         if (thumbnail == null)
+        {
+            _currentHashCode = null;
+            _currentHashCodeContext.Value = null;
             return null;
+        }
 
         int hashCode = GetStableThumbnailHash(thumbnail);
-
-        if (hashCode == 0)
-            return null;
 
         if (_thumbnailCache.TryGetValue(hashCode, out var cachedImage) && cachedImage != null)
         {
@@ -159,6 +160,8 @@ internal static class BitmapHelper
         catch (Exception ex)
         {
             Logger.Info(ex, "Failed to load thumbnail image");
+            _currentHashCode = null;
+            _currentHashCodeContext.Value = null;
             return null;
         }
 
@@ -172,10 +175,13 @@ internal static class BitmapHelper
 
     internal static CroppedBitmap? CropToSquare(BitmapImage? sourceImage)
     {
-        if (sourceImage == null)
+        if (sourceImage == null || sourceImage.PixelWidth <= 0 || sourceImage.PixelHeight <= 0)
             return null;
 
         int size = (int)Math.Min(sourceImage.PixelWidth, sourceImage.PixelHeight);
+        if (size <= 0)
+            return null;
+
         int x = (sourceImage.PixelWidth - size) / 2;
         int y = (sourceImage.PixelHeight - size) / 2;
 
@@ -197,24 +203,14 @@ internal static class BitmapHelper
     /// <returns>List of dominant colors from cached Bitmap as SolidColorBrush</returns>
     public static List<SolidColorBrush> GetDominantColors(int colorCount, int maxIterations = 15)
     {
-        int hashCode = _currentHashCodeContext.Value != 0 ? _currentHashCodeContext.Value : _currentHashCode;
+        if (colorCount <= 0)
+            return [];
 
-        if (!SettingsManager.Current.UseAlbumArtAsAccentColor || hashCode == 0)
+        int? hashCode = _currentHashCodeContext.Value ?? _currentHashCode;
+
+        if (!SettingsManager.Current.UseAlbumArtAsAccentColor || hashCode is null)
         {
-            // control color (buttons, etc.)
-            var accent = (SolidColorBrush)Application.Current.TryFindResource("MicaWPF.Brushes.SystemAccentColorSecondary");
-            if (!accent.IsFrozen)
-                accent = accent.Clone();
-            accent.Freeze();
-
-            // accent color (for non-control elements)
-            var accent2 = (SolidColorBrush)Application.Current.TryFindResource("MicaWPF.Brushes.SystemAccentColorTertiary");
-            if (!accent2.IsFrozen)
-                accent2 = accent2.Clone();
-            accent2.Freeze();
-
-            _currentDominantColors = [accent, accent2];
-            return _currentDominantColors;
+            return GetFallbackAccentColors();
         }
 
         // start timing
@@ -224,16 +220,24 @@ internal static class BitmapHelper
 
         try
         {
+            bool isDarkTheme = SettingsManager.Current.AppTheme switch
+            {
+                1 => false,
+                2 => true,
+                _ => ApplicationThemeManager.GetSystemTheme() == SystemTheme.Dark
+            };
+            var cacheKey = (hashCode.Value, isDarkTheme);
+
             // check if we've already calculated colors for this thumbnail by checking
             // the current hash with cache (dumb method because we're assuming it's always the latest)
-            if (_dominantColorsCache.TryGetValue(hashCode, out var cachedColors) && cachedColors != null)
+            if (_dominantColorsCache.TryGetValue(cacheKey, out var cachedColors) && cachedColors != null)
             {
                 _currentDominantColors = cachedColors;
                 return _currentDominantColors;
             }
 
             // convert BitmapImage to BGRA byte array
-            if (!_thumbnailCache.TryGetValue(hashCode, out var sourceBitmap) || sourceBitmap == null)
+            if (!_thumbnailCache.TryGetValue(hashCode.Value, out var sourceBitmap) || sourceBitmap == null)
             {
                 Logger.Warn($"Thumbnail cache miss while extracting dominant colors");
                 return _currentDominantColors ?? [];
@@ -267,6 +271,20 @@ internal static class BitmapHelper
                 if (rng.Next(10) != 0) continue; // sample ~10%
 
                 samples.Add([r, g, b]);
+            }
+
+            if (samples.Count == 0)
+            {
+                for (int i = 0; i < pixels.Length; i += 4)
+                {
+                    if (pixels[i + 3] < 128) continue;
+                    samples.Add([pixels[i + 2], pixels[i + 1], pixels[i]]);
+                }
+            }
+
+            if (samples.Count == 0)
+            {
+                return GetFallbackAccentColors();
             }
 
             List<Color> result;
@@ -319,17 +337,19 @@ internal static class BitmapHelper
             }
             else
             {
+                int clusterCount = Math.Min(colorCount, samples.Count);
+
                 // get random initial centroids
                 var centroids = samples
                     .OrderBy(_ => rng.Next())
-                    .Take(colorCount)
+                    .Take(clusterCount)
                     .Select(p => new double[] { p[0], p[1], p[2] })
                     .ToList();
 
                 // k-means iterations
                 for (int iter = 0; iter < maxIterations; iter++)
                 {
-                    var clusters = Enumerable.Range(0, colorCount)
+                    var clusters = Enumerable.Range(0, clusterCount)
                         .Select(_ => new List<int[]>())
                         .ToList();
 
@@ -339,7 +359,7 @@ internal static class BitmapHelper
                         int best = 0;
                         double bestDist = double.MaxValue;
 
-                        for (int i = 0; i < colorCount; i++)
+                        for (int i = 0; i < clusterCount; i++)
                         {
                             double dr = pixel[0] - centroids[i][0];
                             double dg = pixel[1] - centroids[i][1];
@@ -354,7 +374,7 @@ internal static class BitmapHelper
 
                     // recalculate centroids + check convergence
                     bool converged = true;
-                    for (int i = 0; i < colorCount; i++)
+                    for (int i = 0; i < clusterCount; i++)
                     {
                         if (clusters[i].Count == 0) continue;
 
@@ -379,7 +399,7 @@ internal static class BitmapHelper
                 result = [.. centroids.Select(c => Color.FromArgb(255, (byte)c[0], (byte)c[1], (byte)c[2]))];
             }
 
-            if (ApplicationThemeManager.GetSystemTheme() == SystemTheme.Dark)
+            if (isDarkTheme)
             {
                 // lighten colors and add contrast when in dark mode
                 result = [.. result
@@ -437,7 +457,7 @@ internal static class BitmapHelper
             _currentDominantColors = brushes;
 
             // save brushes to cache with current hash as key
-            _dominantColorsCache.Set(hashCode, _currentDominantColors);
+            _dominantColorsCache.Set(cacheKey, _currentDominantColors);
 
 #if DEBUG
             stopwatch.Stop();
@@ -450,6 +470,26 @@ internal static class BitmapHelper
             Logger.Error(ex, "Error extracting dominant colors");
             return [];
         }
+    }
+
+    private static List<SolidColorBrush> GetFallbackAccentColors()
+    {
+        // control color (buttons, etc.)
+        var accent = Application.Current?.TryFindResource("MicaWPF.Brushes.SystemAccentColorSecondary") as SolidColorBrush
+            ?? new SolidColorBrush(SystemColors.AccentColor);
+        if (!accent.IsFrozen)
+            accent = accent.Clone();
+        accent.Freeze();
+
+        // accent color (for non-control elements)
+        var accent2 = Application.Current?.TryFindResource("MicaWPF.Brushes.SystemAccentColorTertiary") as SolidColorBrush
+            ?? new SolidColorBrush(SystemColors.AccentColor);
+        if (!accent2.IsFrozen)
+            accent2 = accent2.Clone();
+        accent2.Freeze();
+
+        _currentDominantColors = [accent, accent2];
+        return _currentDominantColors;
     }
 
     private static double ToLinear(byte v)

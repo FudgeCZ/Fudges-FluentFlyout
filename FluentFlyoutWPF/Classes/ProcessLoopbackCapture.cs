@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
-using Microsoft.Win32.SafeHandles;
 
 namespace FluentFlyoutWPF.Classes;
 
@@ -22,151 +20,181 @@ public sealed class ProcessLoopbackCapture : IDisposable
     private const int AudclntStreamflagsEventCallback = 0x00040000;
     private const int AudclntStreamflagsAutoconvertPcm = unchecked((int)0x80000000);
     private const int AudclntStreamflagsSrcDefaultQuality = 0x08000000;
-    private const int ProcessLoopbackModeProcessTarget = 1;
+    private const int AudclntBufferflagsSilent = 0x2;
+    private const int ProcessLoopbackModeProcessTarget = 0; // PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
 
     private static readonly Guid IidAudioClient = new("1CB9AD4C-DBFA-4C32-B178-C2F568A703B2");
 
     public event Action<byte[], int>? DataAvailable;
 
     private readonly int _pid;
-    private IntPtr _audioClient;
+    private readonly object _lock = new();
     private IntPtr _captureClient;
-    private SafeWaitHandle? _eventHandle;
+    private EventWaitHandle? _eventHandle;
     private Thread? _thread;
     private volatile bool _stopping;
+    private bool _disposed;
     private IAudioClient? _clientRcw;
 
     public ProcessLoopbackCapture(int pid) => _pid = pid;
 
     public bool Start()
     {
-        try
+        lock (_lock)
         {
-            var handler = new ActivationHandler();
-            IntPtr handlerPtr = Marshal.GetIUnknownForObject(handler);
+            if (_disposed || _thread != null)
+                return false;
+
             try
             {
-                var activationParams = new AudioClientActivationParams
+                var handler = new ActivationHandler();
+                IntPtr handlerPtr = Marshal.GetIUnknownForObject(handler);
+                try
                 {
-                    ActivationType = 1 /* PROCESS_LOOPBACK */,
-                    ProcessLoopbackParams = new AudioClientProcessLoopbackParams
+                    var activationParams = new AudioClientActivationParams
                     {
-                        ProcessLoopbackMode = ProcessLoopbackModeProcessTarget,
-                        TargetProcessId = (uint)_pid,
-                    },
-                };
+                        ActivationType = 1 /* PROCESS_LOOPBACK */,
+                        ProcessLoopbackParams = new AudioClientProcessLoopbackParams
+                        {
+                            ProcessLoopbackMode = ProcessLoopbackModeProcessTarget,
+                            TargetProcessId = (uint)_pid,
+                        },
+                    };
 
-                IntPtr paramsPtr = Marshal.AllocHGlobal(Marshal.SizeOf<AudioClientActivationParams>());
-                Marshal.StructureToPtr(activationParams, paramsPtr, false);
+                    int paramsSize = Marshal.SizeOf<AudioClientActivationParams>();
+                    IntPtr paramsPtr = Marshal.AllocHGlobal(paramsSize);
+                    IntPtr propVariant = Marshal.AllocHGlobal(24);
+                    try
+                    {
+                        Marshal.StructureToPtr(activationParams, paramsPtr, false);
 
-                // PROPVARIANT (VT_BLOB) pointing at the activation params
-                IntPtr propVariant = Marshal.AllocHGlobal(24);
-                Marshal.WriteInt16(propVariant, 0, 65); // VT_BLOB
-                Marshal.WriteInt64(propVariant, 8, Marshal.SizeOf<AudioClientActivationParams>());
-                Marshal.WriteIntPtr(propVariant, 16, paramsPtr);
+                        // Zero-init PROPVARIANT (VT_BLOB) pointing at the activation params
+                        Marshal.WriteInt64(propVariant, 0, 0);
+                        Marshal.WriteInt64(propVariant, 8, 0);
+                        Marshal.WriteInt64(propVariant, 16, 0);
+                        Marshal.WriteInt16(propVariant, 0, 65); // VT_BLOB
+                        Marshal.WriteInt32(propVariant, 8, paramsSize);
+                        Marshal.WriteIntPtr(propVariant, 8 + IntPtr.Size, paramsPtr);
 
-                int hr = ActivateAudioInterfaceAsync("VAD\\Process_Loopback", IidAudioClient,
-                    propVariant, handlerPtr, out IntPtr operationPtr);
+                        int hr = ActivateAudioInterfaceAsync("VAD\\Process_Loopback", in IidAudioClient,
+                            propVariant, handlerPtr, out IntPtr operationPtr);
 
-                Marshal.FreeHGlobal(propVariant); // HGlobal, NOT a COM pointer
-                Marshal.FreeHGlobal(paramsPtr);
-                if (operationPtr != IntPtr.Zero)
-                    Marshal.Release(operationPtr);
-                if (hr != 0)
+                        if (operationPtr != IntPtr.Zero)
+                            Marshal.Release(operationPtr);
+                        if (hr != 0)
+                        {
+                            Logger.Warn($"Process loopback activation failed for PID {_pid}: 0x{hr:X8}");
+                            return false;
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.FreeHGlobal(propVariant); // HGlobal, NOT a COM pointer
+                        Marshal.FreeHGlobal(paramsPtr);
+                    }
+                }
+                finally
                 {
-                    Logger.Warn($"Process loopback activation failed for PID {_pid}: 0x{hr:X8}");
+                    Marshal.Release(handlerPtr);
+                }
+
+                if (!handler.Task.Task.Wait(TimeSpan.FromSeconds(4)) || !handler.Task.Task.IsCompletedSuccessfully || handler.Task.Task.Result == null)
+                {
+                    Logger.Warn($"Process loopback activation timed out for PID {_pid}");
                     return false;
                 }
-            }
-            finally
-            {
-                Marshal.Release(handlerPtr);
-            }
 
-            if (!handler.Task.Task.Wait(TimeSpan.FromSeconds(4)) || handler.Task.Task.Result == null)
+                _clientRcw = (IAudioClient)handler.Task.Task.Result!;
+
+                // 48 kHz stereo IEEE float
+                var format = new WaveFormatEx
+                {
+                    FormatTag = 3,
+                    Channels = 2,
+                    SampleRate = 48000,
+                    BitsPerSample = 32,
+                    BlockAlign = 8,
+                    AvgBytesPerSec = 48000 * 8,
+                    ExtraSize = 0,
+                };
+                IntPtr formatPtr = Marshal.AllocHGlobal(Marshal.SizeOf<WaveFormatEx>());
+                int initHr;
+                try
+                {
+                    Marshal.StructureToPtr(format, formatPtr, false);
+                    initHr = _clientRcw.Initialize(AudclntSharemodeShared,
+                        AudclntStreamflagsLoopback | AudclntStreamflagsEventCallback |
+                        AudclntStreamflagsAutoconvertPcm | AudclntStreamflagsSrcDefaultQuality,
+                        1_000_000, 0, formatPtr, IntPtr.Zero);
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(formatPtr);
+                }
+                if (initHr != 0)
+                {
+                    Logger.Warn($"Process loopback Initialize failed for PID {_pid}: 0x{initHr:X8}");
+                    CleanupResources();
+                    return false;
+                }
+
+                _eventHandle = new EventWaitHandle(false, EventResetMode.AutoReset);
+                if (_clientRcw.SetEventHandle(_eventHandle.SafeWaitHandle.DangerousGetHandle()) != 0)
+                {
+                    Logger.Warn($"SetEventHandle failed for PID {_pid}");
+                    CleanupResources();
+                    return false;
+                }
+
+                Guid captureIid = new("C8ADBD64-E71E-48A0-A4DE-185C395CD317");
+                if (_clientRcw.GetService(ref captureIid, out IntPtr capturePtr) != 0 || capturePtr == IntPtr.Zero)
+                {
+                    Logger.Warn($"GetService(IAudioCaptureClient) failed for PID {_pid}");
+                    CleanupResources();
+                    return false;
+                }
+                _captureClient = capturePtr;
+
+                if (_clientRcw.Start() != 0)
+                {
+                    Logger.Warn($"Start failed for PID {_pid}");
+                    CleanupResources();
+                    return false;
+                }
+
+                var captureThread = new Thread(CaptureLoop)
+                {
+                    IsBackground = true,
+                    Name = $"ProcessLoopback-{_pid}",
+                };
+                _thread = captureThread;
+                captureThread.Start();
+                return true;
+            }
+            catch (Exception ex)
             {
-                Logger.Warn($"Process loopback activation timed out for PID {_pid}");
+                Logger.Warn(ex, $"Process loopback start failed for PID {_pid}");
+                CleanupResources();
                 return false;
             }
-
-            _clientRcw = (IAudioClient)handler.Task.Task.Result!;
-            _audioClient = Marshal.GetIUnknownForObject(_clientRcw);
-
-            // 48 kHz stereo IEEE float
-            var format = new WaveFormatEx
-            {
-                FormatTag = 3,
-                Channels = 2,
-                SampleRate = 48000,
-                BitsPerSample = 32,
-                BlockAlign = 8,
-                AvgBytesPerSec = 48000 * 8,
-                ExtraSize = 0,
-            };
-            IntPtr formatPtr = Marshal.AllocHGlobal(Marshal.SizeOf<WaveFormatEx>());
-            Marshal.StructureToPtr(format, formatPtr, false);
-
-            int initHr = _clientRcw.Initialize(AudclntSharemodeShared,
-                AudclntStreamflagsLoopback | AudclntStreamflagsEventCallback |
-                AudclntStreamflagsAutoconvertPcm | AudclntStreamflagsSrcDefaultQuality,
-                1_000_000, 0, formatPtr, IntPtr.Zero);
-            Marshal.FreeHGlobal(formatPtr);
-            if (initHr != 0)
-            {
-                Logger.Warn($"Process loopback Initialize failed for PID {_pid}: 0x{initHr:X8}");
-                return false;
-            }
-
-            _eventHandle = new SafeWaitHandle(CreateEvent(IntPtr.Zero, false, false, null), true);
-            if (_clientRcw.SetEventHandle(_eventHandle.DangerousGetHandle()) != 0)
-            {
-                Logger.Warn($"SetEventHandle failed for PID {_pid}");
-                return false;
-            }
-
-            Guid captureIid = new("C8ADBD64-E71E-48A0-A4DE-185C395CD317");
-            if (_clientRcw.GetService(ref captureIid, out IntPtr capturePtr) != 0 || capturePtr == IntPtr.Zero)
-            {
-                Logger.Warn($"GetService(IAudioCaptureClient) failed for PID {_pid}");
-                return false;
-            }
-            _captureClient = capturePtr;
-
-            if (_clientRcw.Start() != 0)
-            {
-                Logger.Warn($"Start failed for PID {_pid}");
-                return false;
-            }
-
-            _thread = new Thread(CaptureLoop)
-            {
-                IsBackground = true,
-                Name = $"ProcessLoopback-{_pid}",
-            };
-            _thread.Start();
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Logger.Warn(ex, $"Process loopback start failed for PID {_pid}");
-            return false;
         }
     }
 
     private unsafe void CaptureLoop()
     {
-        var capture = (IAudioCaptureClient)Marshal.GetObjectForIUnknown(_captureClient);
-        var waitHandle = new EventWaitHandle(false, EventResetMode.AutoReset)
-        {
-            SafeWaitHandle = _eventHandle!,
-        };
+        IntPtr captureClientPtr = _captureClient;
+        EventWaitHandle? eventHandle = _eventHandle;
+        if (captureClientPtr == IntPtr.Zero || eventHandle == null)
+            return;
+
+        var capture = (IAudioCaptureClient)Marshal.GetObjectForIUnknown(captureClientPtr);
 
         try
         {
             byte[] buffer = new byte[192000]; // >= 1 s of 48k stereo float
             while (!_stopping)
             {
-                if (!waitHandle.WaitOne(2000))
+                if (!eventHandle.WaitOne(2000))
                     continue;
 
                 while (!_stopping)
@@ -174,21 +202,37 @@ public sealed class ProcessLoopbackCapture : IDisposable
                     if (capture.GetNextPacketSize(out uint packetFrames) != 0 || packetFrames == 0)
                         break;
 
-                    if (capture.GetBuffer(out IntPtr dataPtr, out uint frames, out _, out _, out _) != 0)
+                    if (capture.GetBuffer(out IntPtr dataPtr, out uint frames, out int flags, out _, out _) != 0)
                         break;
 
-                    int bytes = (int)frames * 8;
-                    if (bytes > buffer.Length)
-                        bytes = buffer.Length;
-
-                    fixed (byte* dst = buffer)
+                    long totalBytes = (long)frames * 8;
+                    if (totalBytes > 0 && totalBytes <= int.MaxValue)
                     {
-                        Buffer.MemoryCopy((void*)dataPtr, dst, buffer.Length, bytes);
-                    }
-                    capture.ReleaseBuffer(frames);
+                        int bytes = (int)totalBytes;
+                        if (bytes > buffer.Length)
+                            buffer = new byte[bytes];
 
-                    if (!_stopping)
-                        DataAvailable?.Invoke(buffer, bytes);
+                        if ((flags & AudclntBufferflagsSilent) != 0 || dataPtr == IntPtr.Zero)
+                        {
+                            Array.Clear(buffer, 0, bytes);
+                        }
+                        else
+                        {
+                            fixed (byte* dst = buffer)
+                            {
+                                Buffer.MemoryCopy((void*)dataPtr, dst, buffer.Length, bytes);
+                            }
+                        }
+
+                        capture.ReleaseBuffer(frames);
+
+                        if (!_stopping)
+                            DataAvailable?.Invoke(buffer, bytes);
+                    }
+                    else
+                    {
+                        capture.ReleaseBuffer(frames);
+                    }
                 }
             }
         }
@@ -200,41 +244,71 @@ public sealed class ProcessLoopbackCapture : IDisposable
         finally
         {
             Marshal.ReleaseComObject(capture);
-            waitHandle.Dispose();
         }
     }
 
-    public void Dispose()
+    private void CleanupResources()
     {
-        _stopping = true;
-        try
-        {
-            if (_clientRcw != null)
-            {
-                _clientRcw.Stop();
-            }
-        }
-        catch { /* client may already be gone */ }
-
-        try
-        {
-            _thread?.Join(500);
-        }
-        catch { /* thread may have never started */ }
-
         if (_captureClient != IntPtr.Zero)
         {
             Marshal.Release(_captureClient);
             _captureClient = IntPtr.Zero;
         }
-        if (_audioClient != IntPtr.Zero)
+        if (_clientRcw != null)
         {
-            Marshal.Release(_audioClient);
-            _audioClient = IntPtr.Zero;
+            try
+            {
+                if (Marshal.IsComObject(_clientRcw))
+                    Marshal.ReleaseComObject(_clientRcw);
+            }
+            catch { /* client may already be gone */ }
+            _clientRcw = null;
         }
-        _clientRcw = null;
         _eventHandle?.Dispose();
         _eventHandle = null;
+    }
+
+    public void Dispose()
+    {
+        Thread? threadToJoin;
+        EventWaitHandle? eventToSignal;
+        IAudioClient? clientToStop;
+
+        lock (_lock)
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            _stopping = true;
+
+            threadToJoin = _thread;
+            _thread = null;
+            eventToSignal = _eventHandle;
+            clientToStop = _clientRcw;
+        }
+
+        try
+        {
+            clientToStop?.Stop();
+        }
+        catch { /* client may already be gone */ }
+
+        try
+        {
+            eventToSignal?.Set();
+        }
+        catch { /* handle may already be closed */ }
+
+        try
+        {
+            threadToJoin?.Join(500);
+        }
+        catch { /* thread may have never started */ }
+
+        lock (_lock)
+        {
+            CleanupResources();
+        }
     }
 
     // --- COM interop ---
@@ -242,13 +316,10 @@ public sealed class ProcessLoopbackCapture : IDisposable
     [DllImport("mmdevapi.dll", PreserveSig = true)]
     private static extern int ActivateAudioInterfaceAsync(
         [MarshalAs(UnmanagedType.LPWStr)] string deviceId,
-        Guid interfaceGuid,
+        in Guid interfaceGuid,
         IntPtr activationParams, // PROPVARIANT*
         IntPtr completionHandler, // IActivateAudioInterfaceCompletionHandler*
         out IntPtr operation);    // IActivateAudioInterfaceAsyncOperation**
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr CreateEvent(IntPtr attrs, bool manualReset, bool initialState, string? name);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct AudioClientActivationParams
@@ -285,8 +356,8 @@ public sealed class ProcessLoopbackCapture : IDisposable
         {
             try
             {
-                operation.GetActivateResult(out int hr, out object? punk);
-                if (hr != 0 || punk == null)
+                int callHr = operation.GetActivateResult(out int hr, out object? punk);
+                if (callHr != 0 || hr != 0 || punk == null)
                     Task.TrySetResult(null);
                 else
                     Task.TrySetResult(punk);
@@ -311,7 +382,7 @@ public sealed class ProcessLoopbackCapture : IDisposable
     private interface IActivateAudioInterfaceAsyncOperation
     {
         [PreserveSig]
-        void GetActivateResult(out int activateResult,
+        int GetActivateResult(out int activateResult,
             [MarshalAs(UnmanagedType.Interface)] out object? activatedInterface);
     }
 
@@ -339,7 +410,7 @@ public sealed class ProcessLoopbackCapture : IDisposable
         [PreserveSig]
         int GetMixFormat(out IntPtr format);
         [PreserveSig]
-        int GetService(ref Guid interfaceId, out IntPtr service);
+        int GetDevicePeriod(out long defaultDevicePeriod, out long minimumDevicePeriod);
         [PreserveSig]
         int Start();
         [PreserveSig]
@@ -348,6 +419,8 @@ public sealed class ProcessLoopbackCapture : IDisposable
         int Reset();
         [PreserveSig]
         int SetEventHandle(IntPtr @event);
+        [PreserveSig]
+        int GetService(ref Guid interfaceId, out IntPtr service);
     }
 
     [ComImport, Guid("C8ADBD64-E71E-48A0-A4DE-185C395CD317"),

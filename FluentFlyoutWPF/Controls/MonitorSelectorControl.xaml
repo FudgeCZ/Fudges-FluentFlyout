@@ -7,8 +7,8 @@
              mc:Ignorable="d"
              d:DesignWidth="760" d:DesignHeight="260">
     <Border CornerRadius="8"
-            Background="#181818"
-            BorderBrush="#2E2E2E"
+            Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+            BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
             BorderThickness="1"
             ClipToBounds="True">
         <Grid>
@@ -22,7 +22,7 @@
             <TextBlock Grid.Row="0"
                        x:Name="SubtitleTextBlock"
                        Text="Select a display to change its settings. Click On/Off on any display to enable or disable it."
-                       Foreground="#B5FFFFFF"
+                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
                        FontSize="12"
                        Margin="16,12,16,0"
                        TextWrapping="Wrap" />
@@ -36,8 +36,8 @@
 
             <!-- Bottom action bar (Selected monitor info + quick toggles + Identify + Copy to all) -->
             <Border Grid.Row="2"
-                    Background="#222222"
-                    BorderBrush="#2E2E2E"
+                    Background="{DynamicResource CardBackgroundFillColorSecondaryBrush}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
                     BorderThickness="0,1,0,0"
                     Padding="16,10">
                 <Grid>
@@ -49,7 +49,7 @@
                     <StackPanel Grid.Column="0" Orientation="Vertical" VerticalAlignment="Center" Margin="0,0,12,0">
                         <TextBlock x:Name="SelectedMonitorInfoText"
                                    Text="Display 1"
-                                   Foreground="White"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"
                                    FontSize="13"
                                    FontWeight="SemiBold"
                                    TextTrimming="CharacterEllipsis" />

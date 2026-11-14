@@ -17,9 +17,11 @@ namespace FluentFlyoutWPF.Windows;
 /// </summary>
 public partial class LockWindow : MicaWindow
 {
+    private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
     private CancellationTokenSource cts;
     private MainWindow _mainWindow = (MainWindow)Application.Current.MainWindow;
     private bool _isHiding = true;
+    private bool _isClosed;
     private MonitorInfo _openedMonitor;
 
     public LockWindow()
@@ -45,10 +47,16 @@ public partial class LockWindow : MicaWindow
                 // not sure how to properly check if overwrite or insert as every program has different behavior
                 //if (isOn) LockTextBlock.Text = "Insert mode";
                 //else LockTextBlock.Text = "Overwrite mode";
-                LockTextBlock.Text = FindResource("LockWindow_InsertPressed").ToString();
+                LockTextBlock.Text = TryFindResource("LockWindow_InsertPressed")?.ToString() ?? "Insert";
                 isOn = true;
             }
-            else LockTextBlock.Text = key + " " + (isOn ? FindResource("LockWindow_LockOn").ToString() : FindResource("LockWindow_LockOff").ToString());
+            else
+            {
+                string stateText = (isOn
+                    ? TryFindResource("LockWindow_LockOn")?.ToString()
+                    : TryFindResource("LockWindow_LockOff")?.ToString()) ?? (isOn ? "On" : "Off");
+                LockTextBlock.Text = $"{key} {stateText}";
+            }
 
             LockTextBlock.FontWeight = SettingsManager.Current.LockKeysBoldUi
                 ? SettingsManager.Current.AppLanguage == "zh-CN" || SettingsManager.Current.AppLanguage == "zh-TW"
@@ -122,7 +130,7 @@ public partial class LockWindow : MicaWindow
 
     public async void ShowLockFlyout(string? key, bool isOn)
     {
-        if (string.IsNullOrEmpty(key)) return;
+        if (string.IsNullOrEmpty(key) || _isClosed) return;
 
         if (SettingsManager.Current.LockKeysAcrylicWindowEnabled)
         {
@@ -152,26 +160,32 @@ public partial class LockWindow : MicaWindow
             _mainWindow.OpenAnimation(window: this, alwaysBottom: true, selectedMonitor: _openedMonitor);
         }
         cts.Cancel();
+        cts.Dispose();
         cts = new CancellationTokenSource();
         var token = cts.Token;
 
         try
         {
-            while (!token.IsCancellationRequested)
+            if (!token.IsCancellationRequested)
             {
-                await Task.Delay(SettingsManager.Current.LockKeysDuration, token);
+                await Task.Delay(Math.Max(0, SettingsManager.Current.LockKeysDuration), token);
+                if (_isClosed || token.IsCancellationRequested) return;
+
                 _mainWindow.CloseAnimation(window: this, selectedMonitor: _openedMonitor);
                 _isHiding = true;
-                await Task.Delay(MainWindow.getDuration());
-                if (_isHiding == false) return;
+                await Task.Delay(MainWindow.getDuration(), token);
+                if (_isHiding == false || _isClosed || token.IsCancellationRequested) return;
 
                 WindowHelper.SetVisibility(this, false);
-                break;
             }
         }
         catch (TaskCanceledException)
         {
             // do nothing
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Error in ShowLockFlyout");
         }
     }
 
@@ -187,6 +201,7 @@ public partial class LockWindow : MicaWindow
 
     protected override void OnClosed(EventArgs e)
     {
+        _isClosed = true;
         cts.Cancel();
         cts.Dispose();
         base.OnClosed(e);

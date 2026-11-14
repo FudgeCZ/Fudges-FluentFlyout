@@ -19,26 +19,13 @@ public partial class SettingsWindow : FluentWindow
 
     private static SettingsWindow? instance;
     private Type? _currentPageType;
-    private ScrollViewer? _contentScrollViewer;
+    private Type? _initialPageType;
     private List<SearchItem> _allSearchItems = [];
     private string? _pendingHighlightElementId = null;
     static readonly Regex SplitCamelCaseRegex = new(@"(?<=[a-z0-9])(?=[A-Z])", RegexOptions.Compiled);
 
-    public SettingsWindow()
+    private SettingsWindow()
     {
-        if (instance != null)
-        {
-            if (instance.WindowState == WindowState.Minimized)
-            {
-                instance.WindowState = WindowState.Normal;
-            }
-
-            instance.Activate();
-            instance.Focus();
-            Close();
-            return;
-        }
-
         InitializeComponent();
         instance = this;
 
@@ -68,7 +55,6 @@ public partial class SettingsWindow : FluentWindow
             WindowState = WindowState.Maximized;
         }
 
-        Closed += (s, e) => instance = null;
         DataContext = SettingsManager.Current;
 
         RootNavigation.SetCurrentValue(NavigationView.IsPaneOpenProperty, false);
@@ -76,29 +62,34 @@ public partial class SettingsWindow : FluentWindow
 
     public static void ShowInstance(string? navigationPage = null)
     {
+        Type? targetPageType = navigationPage != null
+            ? System.Reflection.Assembly
+                .GetExecutingAssembly()
+                .GetType($"FluentFlyoutWPF.Pages.{navigationPage}")
+            : null;
+
         if (instance == null)
         {
-            new SettingsWindow().Show();
-            instance?.Activate();
-        }
-        else
-        {
-            if (instance.WindowState == WindowState.Minimized)
+            var window = new SettingsWindow
             {
-                instance.WindowState = WindowState.Normal;
-            }
-
-            instance.Activate();
-            instance.Focus();
+                _initialPageType = targetPageType
+            };
+            window.Show();
+            window.Activate();
+            return;
         }
 
-        if (navigationPage != null)
+        if (instance.WindowState == WindowState.Minimized)
         {
-            var pageType = System.Reflection.Assembly
-                .GetExecutingAssembly()
-                .GetType($"FluentFlyoutWPF.Pages.{navigationPage}");
-            if (pageType != null)
-                NavigateToPage(pageType);
+            instance.WindowState = WindowState.Normal;
+        }
+
+        instance.Activate();
+        instance.Focus();
+
+        if (targetPageType != null)
+        {
+            NavigateToPage(targetPageType);
         }
     }
 
@@ -126,7 +117,13 @@ public partial class SettingsWindow : FluentWindow
     {
         if (args.Reason == AutoSuggestionBoxTextChangeReason.UserInput)
         {
-            var query = sender.Text.ToLowerInvariant();
+            var query = (sender.Text ?? string.Empty).ToLowerInvariant();
+            if (string.IsNullOrEmpty(query))
+            {
+                sender.ItemsSource = _allSearchItems;
+                sender.IsSuggestionListOpen = false;
+                return;
+            }
             var matches = _allSearchItems.Where(x => x.Title.ToLowerInvariant().Contains(query)).ToList();
             sender.ItemsSource = matches;
             sender.IsSuggestionListOpen = matches.Count > 0;
@@ -145,7 +142,13 @@ public partial class SettingsWindow : FluentWindow
 
     public static void NavigateToPage(Type pageType)
     {
-        instance?.RootNavigation.Navigate(pageType);
+        if (instance == null) return;
+        if (!instance.IsLoaded)
+        {
+            instance._initialPageType = pageType;
+            return;
+        }
+        instance.RootNavigation.Navigate(pageType);
     }
 
     private void BuildSearchItems()
@@ -164,7 +167,7 @@ public partial class SettingsWindow : FluentWindow
         // Add specific settings deep links from auto-generated static array
         foreach (var item in SearchItems)
         {
-            string title = Application.Current.TryFindResource(item.ResourceKey)?.ToString() ?? item.ResourceKey;
+            string title = Application.Current?.TryFindResource(item.ResourceKey)?.ToString() ?? item.ResourceKey;
             // Clean up the page type name (e.g. "SystemPage" -> "System") and split camel case (e.g. "MediaFlyout" -> "Media Flyout")
             string pageName = SplitCamelCaseRegex.Replace(item.TargetPageType.Name.Replace("Page", ""), " ");
             items.Add(new SearchItem { Title = $"{title}", Subtitle = pageName, TargetPageType = item.TargetPageType, TargetElementId = item.TargetElementId });
@@ -208,62 +211,98 @@ public partial class SettingsWindow : FluentWindow
     {
         RootNavigation.IsPaneOpen = false;
 
-        _currentPageType = typeof(HomePage);
+        _currentPageType = _initialPageType ?? typeof(HomePage);
+        _initialPageType = null;
         RootNavigation.Navigate(_currentPageType);
 
         // wrkaround for WPF-UI NavigationView theme change bug:
         // force pane initialization by toggling it once to prevent width corruption on theme changes
         // not sure why this has to be done
         await Task.Delay(100);
+        if (!IsLoaded) return;
         RootNavigation.IsPaneOpen = true;
         await Task.Delay(10);
+        if (!IsLoaded) return;
         RootNavigation.IsPaneOpen = false;
 
         LicenseManager.GetPremiumProductInfo();
 
-        RootNavigation.Navigated += (s, args) =>
+        RootNavigation.Navigated -= RootNavigation_Navigated;
+        RootNavigation.Navigated += RootNavigation_Navigated;
+
+        SettingsManager.Current.PropertyChanged -= Settings_PropertyChanged;
+        SettingsManager.Current.PropertyChanged += Settings_PropertyChanged;
+
+        BuildSearchItems();
+    }
+
+    private async void RootNavigation_Navigated(NavigationView sender, NavigatedEventArgs args)
+    {
+        _currentPageType = args.Page?.GetType();
+        ResetScrollPosition(args.Page as DependencyObject);
+        if (!string.IsNullOrEmpty(_pendingHighlightElementId))
         {
-            _currentPageType = args.Page?.GetType();
-            ResetScrollPosition();
-            if (!string.IsNullOrEmpty(_pendingHighlightElementId))
+            var elementId = _pendingHighlightElementId;
+            _pendingHighlightElementId = null;
+            // Add a slight delay to ensure page is fully rendered before finding child and scrolling
+            await Task.Delay(300);
+            if (IsLoaded)
             {
-                var elementId = _pendingHighlightElementId;
-                _pendingHighlightElementId = null;
-                // Add a slight delay to ensure page is fully rendered before finding child and scrolling
-                Task.Delay(300).ContinueWith(_ => ScrollToAndHighlight(elementId));
+                ScrollToAndHighlight(elementId);
             }
-        };
+        }
+    }
 
-        SettingsManager.Current.PropertyChanged += async (s, args) =>
+    private async void Settings_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        try
         {
-            if (args.PropertyName == nameof(SettingsManager.Current.AppTheme))
+            if (e.PropertyName == nameof(SettingsManager.Current.AppTheme))
             {
-                var wasPaneOpen = RootNavigation.IsPaneOpen;
-
                 // force fix pane state after theme change
-                await Dispatcher.InvokeAsync(async () =>
+                await await Dispatcher.InvokeAsync(async () =>
                 {
+                    if (!IsLoaded) return;
+                    var wasPaneOpen = RootNavigation.IsPaneOpen;
+
                     await Task.Delay(100);
+                    if (!IsLoaded) return;
                     RootNavigation.IsPaneOpen = !wasPaneOpen;
                     await Task.Delay(10);
+                    if (!IsLoaded) return;
                     RootNavigation.IsPaneOpen = wasPaneOpen;
 
                     await Task.Delay(300);
+                    if (!IsLoaded) return;
                     RootNavigation.Navigate(typeof(HomePage));
 
                     BuildSearchItems();
                 }, System.Windows.Threading.DispatcherPriority.Loaded);
             }
-            else if (args.PropertyName == nameof(SettingsManager.Current.AppLanguage))
+            else if (e.PropertyName == nameof(SettingsManager.Current.AppLanguage))
             {
                 await Dispatcher.InvokeAsync(() =>
                 {
+                    if (!IsLoaded) return;
                     BuildSearchItems();
                 }, System.Windows.Threading.DispatcherPriority.Loaded);
             }
-        };
+        }
+        catch (Exception ex)
+        {
+            Logger.Error(ex, "Error handling settings change in SettingsWindow");
+        }
+    }
 
-        BuildSearchItems();
+    protected override void OnClosed(EventArgs e)
+    {
+        SettingsManager.Current.PropertyChanged -= Settings_PropertyChanged;
+        RootNavigation.Navigated -= RootNavigation_Navigated;
+        if (ReferenceEquals(instance, this))
+        {
+            instance = null;
+        }
+        base.OnClosed(e);
     }
 
 
@@ -284,18 +323,17 @@ public partial class SettingsWindow : FluentWindow
         SettingsManager.SaveSettings();
     }
 
-    private void ResetScrollPosition()
+    private void ResetScrollPosition(DependencyObject? navigatedPage)
     {
         Dispatcher.BeginInvoke(new Action(() =>
         {
             try
             {
-                _contentScrollViewer ??= FindScrollableScrollViewer(RootNavigation);
-
-                if (_contentScrollViewer != null)
-                {
-                    _contentScrollViewer.ScrollToVerticalOffset(0);
-                }
+                var scrollViewer = navigatedPage != null
+                    ? FindAncestorScrollViewer(navigatedPage, RootNavigation)
+                    : null;
+                scrollViewer ??= FindScrollableScrollViewer(RootNavigation);
+                scrollViewer?.ScrollToVerticalOffset(0);
             }
             catch (Exception ex)
             {
@@ -306,6 +344,20 @@ public partial class SettingsWindow : FluentWindow
 
 
     // helper functions to traverse visual tree
+
+    private static ScrollViewer? FindAncestorScrollViewer(DependencyObject child, DependencyObject stopAt)
+    {
+        var current = VisualTreeHelper.GetParent(child);
+        while (current != null && !ReferenceEquals(current, stopAt))
+        {
+            if (current is ScrollViewer sv)
+            {
+                return sv;
+            }
+            current = VisualTreeHelper.GetParent(current);
+        }
+        return null;
+    }
 
     private static T? FindChildByName<T>(DependencyObject parent, string name) where T : FrameworkElement
     {
@@ -337,25 +389,6 @@ public partial class SettingsWindow : FluentWindow
             }
 
             var result = FindScrollableScrollViewer(child);
-            if (result != null)
-            {
-                return result;
-            }
-        }
-        return null;
-    }
-
-    private static T? FindVisualChild<T>(DependencyObject parent) where T : DependencyObject
-    {
-        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
-        {
-            var child = VisualTreeHelper.GetChild(parent, i);
-            if (child is T typedChild)
-            {
-                return typedChild;
-            }
-
-            var result = FindVisualChild<T>(child);
             if (result != null)
             {
                 return result;

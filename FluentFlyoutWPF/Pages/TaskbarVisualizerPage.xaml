@@ -9,7 +9,7 @@
       xmlns:fluentflyoutcontrols="clr-namespace:FluentFlyout.Controls"
       mc:Ignorable="d"
       d:DesignHeight="1000" d:DesignWidth="800"
-      Title="TaskbarWidgetPage"
+      Title="TaskbarVisualizerPage"
       d:DataContext="{d:DesignInstance viewModels:UserSettings}"
       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
       d:Background="White">
@@ -18,16 +18,6 @@
         <TextBlock Text="{DynamicResource TaskbarVisualizerTitle}" FontSize="24" FontWeight="SemiBold" FontFamily="Segoe UI Variable" Margin="0,0,0,20" />
         <Grid>
             <Grid.RowDefinitions>
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
@@ -152,6 +142,7 @@
                     </StackPanel>
                 </ui:CardControl.Header>
                 <ComboBox x:Name="TargetAppComboBox" MinWidth="170" Style="{StaticResource DefaultComboBoxStyle}"
+                          IsEnabled="{Binding IsPremiumUnlocked}"
                           DropDownOpened="TargetAppComboBox_DropDownOpened"
                           SelectionChanged="TargetAppComboBox_SelectionChanged" />
             </ui:CardControl>
@@ -163,7 +154,7 @@
                         <TextBlock Text="How the visualizer is drawn." FontSize="12" Opacity="0.5" />
                     </StackPanel>
                 </ui:CardControl.Header>
-                <ComboBox SelectedIndex="{Binding TaskbarVisualizerStyle}" Style="{StaticResource DefaultComboBoxStyle}">
+                <ComboBox SelectedIndex="{Binding TaskbarVisualizerStyle}" IsEnabled="{Binding IsPremiumUnlocked}" Style="{StaticResource DefaultComboBoxStyle}">
                     <ComboBoxItem Content="Bars" />
                     <ComboBoxItem Content="Peaks" />
                     <ComboBoxItem Content="Wave" />
@@ -208,7 +199,22 @@
                                 <TextBlock Text="{DynamicResource TaskbarVisualizerBaselineAutoHideDescription}" FontSize="12" Opacity="0.5" />
                             </StackPanel>
                         </ui:CardControl.Header>
-                        <ui:ToggleSwitch IsChecked="{Binding TaskbarVisualizerBaselineAutoHide, Mode=TwoWay}" IsEnabled="{Binding TaskbarVisualizerBaseline}" />
+                        <ui:ToggleSwitch IsChecked="{Binding TaskbarVisualizerBaselineAutoHide, Mode=TwoWay}">
+                            <ui:ToggleSwitch.Style>
+                                <Style TargetType="ui:ToggleSwitch" BasedOn="{StaticResource {x:Type ui:ToggleSwitch}}">
+                                    <Setter Property="IsEnabled" Value="False" />
+                                    <Style.Triggers>
+                                        <MultiDataTrigger>
+                                            <MultiDataTrigger.Conditions>
+                                                <Condition Binding="{Binding IsPremiumUnlocked}" Value="True" />
+                                                <Condition Binding="{Binding TaskbarVisualizerBaseline}" Value="True" />
+                                            </MultiDataTrigger.Conditions>
+                                            <Setter Property="IsEnabled" Value="True" />
+                                        </MultiDataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </ui:ToggleSwitch.Style>
+                        </ui:ToggleSwitch>
                     </ui:CardControl>
                 </StackPanel>
             </ui:CardExpander>
@@ -249,9 +255,11 @@
                 <ui:CardControl.Header>
                     <StackPanel Orientation="Vertical">
                         <TextBlock FontSize="14" FontWeight="Regular" VerticalAlignment="Center">
-                            <Hyperlink x:Name="StartupHyperlink" Tag="Indexable" NavigateUri="ms-settings:apps-volume" BaselineAlignment="Center"
+                            <Hyperlink x:Name="StartupHyperlink" NavigateUri="ms-settings:apps-volume" BaselineAlignment="Center"
                                    RequestNavigate="StartupHyperlink_RequestNavigate" TextDecorations="None" Foreground="{DynamicResource AccentTextFillColorPrimaryBrush}" >
-                                <Run Text="{DynamicResource TaskbarVisualizerOutputDeviceTitle}" />
+                                <InlineUIContainer BaselineAlignment="Center">
+                                    <TextBlock Text="{DynamicResource TaskbarVisualizerOutputDeviceTitle}" />
+                                </InlineUIContainer>
                                 <ui:SymbolIcon VerticalAlignment="Center" FontSize="14" Symbol="ArrowUpRight24" />
                             </Hyperlink>
                         </TextBlock>

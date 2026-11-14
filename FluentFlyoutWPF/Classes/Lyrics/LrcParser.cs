@@ -1,13 +1,14 @@
 // Copyright (c) 2024-2026 The FluentFlyout Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+using System.Globalization;
 using System.Text.RegularExpressions;
 
 namespace FluentFlyoutWPF.Classes.Lyrics;
 
 public static partial class LrcParser
 {
-    [GeneratedRegex(@"\[(\d+):(\d+(?:[.,:]\d+)?)\]", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\[(\d+):(\d+(?:[.,:]\d+)?)\]", RegexOptions.CultureInvariant | RegexOptions.ECMAScript)]
     private static partial Regex TimestampRegex();
 
     /// <summary>
@@ -19,19 +20,41 @@ public static partial class LrcParser
         var lines = new List<LyricLine>();
         foreach (var raw in lrc.Split('\n'))
         {
-            var matches = TimestampRegex().Matches(raw);
+            var trimmedRaw = raw.TrimEnd('\r');
+            var matches = TimestampRegex().Matches(trimmedRaw);
             if (matches.Count == 0)
                 continue;
 
-            string text = raw[(matches[^1].Index + matches[^1].Length)..].TrimEnd('\r');
+            // Consecutive timestamps before any lyric text share the full line (e.g. [00:10.00][01:20.00]Chorus);
+            // later timestamps embedded in the text are inline karaoke word cues and are stripped from text.
+            int leadingCount = 1;
+            for (int i = 1; i < matches.Count; i++)
+            {
+                int gapStart = matches[i - 1].Index + matches[i - 1].Length;
+                if (string.IsNullOrWhiteSpace(trimmedRaw[gapStart..matches[i].Index]))
+                    leadingCount++;
+                else
+                    break;
+            }
+
+            string text = TimestampRegex().Replace(trimmedRaw, "").Trim();
+            if (leadingCount < matches.Count && text.Contains("  ", StringComparison.Ordinal))
+                text = Regex.Replace(text, @" {2,}", " ");
             if (text.Length == 0)
                 continue;
 
-            foreach (Match m in matches)
+            for (int i = 0; i < leadingCount; i++)
             {
-                int minutes = int.Parse(m.Groups[1].Value);
-                double seconds = double.Parse(m.Groups[2].Value.Replace(',', '.'),
-                    System.Globalization.CultureInfo.InvariantCulture);
+                Match m = matches[i];
+                if (!int.TryParse(m.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out int minutes) ||
+                    minutes > 100000)
+                    continue;
+
+                string secStr = m.Groups[2].Value.Replace(',', '.').Replace(':', '.');
+                if (!double.TryParse(secStr, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out double seconds) ||
+                    double.IsNaN(seconds) || double.IsInfinity(seconds) || seconds < 0 || seconds >= 1000)
+                    continue;
+
                 lines.Add(new LyricLine(TimeSpan.FromMinutes(minutes) + TimeSpan.FromSeconds(seconds), text));
             }
         }

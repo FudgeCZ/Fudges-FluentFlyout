@@ -62,74 +62,70 @@ public partial class VolumeMixerWindow : MicaWindow
     // one day we might want to convert these to an interface
     public async void ShowFlyout(bool startExpanded = false)
     {
-        if (FullscreenDetector.IsFullscreenApplicationRunning())
-            return;
-
-        long currentTime = Environment.TickCount64;
-
-        if (currentTime - _lastFlyoutTime < _flyoutCooldown.TotalMilliseconds)
-        {
-            return;
-        }
-
-        _lastFlyoutTime = currentTime;
-
-        // never let the native OSD share the screen with our flyout — hide it on
-        // every show, not only when the flyout was mid-hide. The OSD window can be
-        // appearing from the very same key press, hence the retry.
-        _ = Task.Run(HideVolumeOsdWithRetry);
-
-        if (_isHiding)
-        {
-            _isHiding = false;
-            if (SettingsManager.Current.VolumeMixerAcrylicWindowEnabled)
-            {
-                WindowBlurHelper.EnableBlur(this);
-            }
-            else
-            {
-                WindowBlurHelper.DisableBlur(this);
-            }
-
-            // refresh all data
-            ViewModel.OnPollTick(null, EventArgs.Empty);
-
-            bool aboveMedia = SettingsManager.Current.VolumeControlAboveMediaFlyout;
-            if (aboveMedia)
-            {
-                Width = _mainWindow.Width;
-                _mainWindow.OpenAnimation(this, aboveReference: _mainWindow, reserveNativeVolumeOsdSpace: true);
-            }
-            else
-            {
-                Width = _normalWidth;
-                _mainWindow.OpenAnimation(this, alwaysBottom: true);
-            }
-
-            Show();
-            WindowHelper.SetTopmost(this);
-
-            _ = Task.Run(() =>
-            {
-                Thread.Sleep(MainWindow.getDuration());
-                Dispatcher.Invoke(() =>
-                {
-                    if (startExpanded) ViewModel.IsExpanded = true;
-                });
-            });
-        }
-        else
-        {
-            // only expand if the flyout isn't expanded already
-            if (startExpanded) ViewModel.IsExpanded = true;
-        }
-
-        _cts.Cancel();
-        _cts = new CancellationTokenSource();
-        var token = _cts.Token;
-
         try
         {
+            if (FullscreenDetector.IsFullscreenApplicationRunning())
+                return;
+
+            long currentTime = Environment.TickCount64;
+
+            if (currentTime - _lastFlyoutTime < _flyoutCooldown.TotalMilliseconds)
+            {
+                return;
+            }
+
+            _lastFlyoutTime = currentTime;
+
+            _cts.Cancel();
+            _cts.Dispose();
+            _cts = new CancellationTokenSource();
+            var token = _cts.Token;
+
+            // never let the native OSD share the screen with our flyout — hide it on
+            // every show, not only when the flyout was mid-hide. The OSD window can be
+            // appearing from the very same key press, hence the retry.
+            _ = Task.Run(HideVolumeOsdWithRetry);
+
+            if (_isHiding)
+            {
+                _isHiding = false;
+                if (SettingsManager.Current.VolumeMixerAcrylicWindowEnabled)
+                {
+                    WindowBlurHelper.EnableBlur(this);
+                }
+                else
+                {
+                    WindowBlurHelper.DisableBlur(this);
+                }
+
+                // refresh all data
+                ViewModel.OnPollTick(null, EventArgs.Empty);
+                ViewModel.StartPolling();
+
+                bool aboveMedia = SettingsManager.Current.VolumeControlAboveMediaFlyout;
+                if (aboveMedia)
+                {
+                    Width = _mainWindow.Width;
+                    _mainWindow.OpenAnimation(this, aboveReference: _mainWindow, reserveNativeVolumeOsdSpace: true);
+                }
+                else
+                {
+                    Width = _normalWidth;
+                    _mainWindow.OpenAnimation(this, alwaysBottom: true);
+                }
+
+                Show();
+                WindowHelper.SetTopmost(this);
+
+                if (startExpanded)
+                    _ = ExpandAfterDelayAsync(token);
+            }
+            else
+            {
+                // only expand if the flyout isn't expanded already
+                if (startExpanded) ViewModel.IsExpanded = true;
+            }
+
             while (!token.IsCancellationRequested)
             {
                 await Task.Delay(100, token); // check if mouse is over every 100ms
@@ -143,7 +139,7 @@ public partial class VolumeMixerWindow : MicaWindow
 
                 if (!mouseOverThis && !mouseOverMedia)
                 {
-                    await Task.Delay(SettingsManager.Current.VolumeControlDuration, token);
+                    await Task.Delay(Math.Max(0, SettingsManager.Current.VolumeControlDuration), token);
 
                     mouseOverThis = WindowHelper.IsMouseOverWindow(this);
                     mouseOverMedia = SettingsManager.Current.VolumeControlAboveMediaFlyout
@@ -152,7 +148,7 @@ public partial class VolumeMixerWindow : MicaWindow
 
                     if (!mouseOverThis && !mouseOverMedia)
                     {
-                        await FinishHideAsync();
+                        await FinishHideAsync(token);
                         break;
                     }
                 }
@@ -162,6 +158,24 @@ public partial class VolumeMixerWindow : MicaWindow
         {
             // do nothing
         }
+        catch (Exception ex)
+        {
+            Logger.Error(ex, "Error in VolumeMixerWindow.ShowFlyout");
+        }
+    }
+
+    private async Task ExpandAfterDelayAsync(CancellationToken token)
+    {
+        try
+        {
+            await Task.Delay(MainWindow.getDuration(), token);
+            if (!token.IsCancellationRequested && !_isHiding)
+                ViewModel.IsExpanded = true;
+        }
+        catch (TaskCanceledException)
+        {
+            // cancelled before delayed expand fired
+        }
     }
 
     /// <summary>
@@ -170,29 +184,45 @@ public partial class VolumeMixerWindow : MicaWindow
     /// </summary>
     public async void HideFlyout()
     {
-        if (_isHiding)
-            return;
+        try
+        {
+            if (_isHiding)
+                return;
 
-        _cts.Cancel();
-        _lastFlyoutTime = 0; // dismissed on purpose: don't let the show cooldown swallow the next trigger
-        await FinishHideAsync();
+            _cts.Cancel();
+            _cts.Dispose();
+            _cts = new CancellationTokenSource();
+            var token = _cts.Token;
+            _lastFlyoutTime = 0; // dismissed on purpose: don't let the show cooldown swallow the next trigger
+            await FinishHideAsync(token);
+        }
+        catch (TaskCanceledException)
+        {
+            // reopened before hide animation completed
+        }
+        catch (Exception ex)
+        {
+            Logger.Error(ex, "Error in VolumeMixerWindow.HideFlyout");
+        }
     }
 
     /// <summary>
     /// Plays the close animation, waits for it and hides the window.
     /// Returns without hiding when the flyout was reopened while the animation was running.
     /// </summary>
-    private async Task FinishHideAsync()
+    private async Task FinishHideAsync(CancellationToken token)
     {
         _mainWindow.CloseAnimation(this);
         _isHiding = true;
-        await Task.Delay(MainWindow.getDuration());
+        await Task.Delay(MainWindow.getDuration(), token);
 
-        if (!_isHiding)
+        if (!_isHiding || token.IsCancellationRequested)
             return;
 
         WindowHelper.SetVisibility(this, false);
-        ViewModel.IsExpanded = false;
+        ViewModel.StopPolling();
+        if (ViewModel.IsExpanded)
+            ViewModel.IsExpanded = false;
         _ = Task.Run(() => ShowVolumeOsd());
     }
 
@@ -206,7 +236,7 @@ public partial class VolumeMixerWindow : MicaWindow
 
     private void OnSessionVolumeChanged(object? sender, EventArgs e)
     {
-        foreach (var tw in _mainWindow.taskbarWindows)
+        foreach (var tw in _mainWindow.GetTaskbarWindowsSnapshot())
         {
             tw.RefreshAppVolumeTooltip();
         }
@@ -356,11 +386,12 @@ public partial class VolumeMixerWindow : MicaWindow
         }
 
         // measure desired size
-        SessionsExpanded.Measure(new Size(ActualWidth, double.PositiveInfinity));
+        double measureWidth = ActualWidth > 0 ? ActualWidth : Width;
+        SessionsExpanded.Measure(new Size(measureWidth, double.PositiveInfinity));
         expandedHeight = _collapsedHeight + Math.Min(SessionsExpanded.DesiredSize.Height, 220);
 
         double targetHeight = expand ? expandedHeight : _collapsedHeight;
-        double currentHeight = ActualHeight;
+        double currentHeight = ActualHeight > 0 ? ActualHeight : _collapsedHeight;
         double heightDelta = targetHeight - currentHeight;
 
         // When at the top, chevron points down (0°) when collapsed and up (180°) when expanded.
@@ -398,8 +429,11 @@ public partial class VolumeMixerWindow : MicaWindow
         {
             heightAnimation.Completed += (s, e) =>
             {
-                SessionsExpanded.Visibility = Visibility.Collapsed;
-                SessionsSeparator.Visibility = Visibility.Collapsed;
+                if (!ViewModel.IsExpanded)
+                {
+                    SessionsExpanded.Visibility = Visibility.Collapsed;
+                    SessionsSeparator.Visibility = Visibility.Collapsed;
+                }
             };
         }
 

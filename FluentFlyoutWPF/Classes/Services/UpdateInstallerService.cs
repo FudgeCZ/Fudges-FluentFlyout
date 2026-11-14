@@ -33,6 +33,7 @@ public static class UpdateInstallerService
     /// </summary>
     public static async Task<string?> DownloadUpdateAsync(string downloadUrl, string version, IProgress<double>? progress, CancellationToken ct = default)
     {
+        string? zipPath = null;
         try
         {
             if (string.IsNullOrEmpty(downloadUrl))
@@ -44,7 +45,11 @@ public static class UpdateInstallerService
                 try { File.Delete(stale); } catch { /* best effort */ }
             }
 
-            string zipPath = Path.Combine(UpdateDir, $"FluentFlyout_{version}_x64.zip");
+            string safeVersion = string.Concat((version ?? string.Empty).Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
+            if (string.IsNullOrWhiteSpace(safeVersion))
+                safeVersion = "update";
+
+            zipPath = Path.Combine(UpdateDir, $"FluentFlyout_{safeVersion}_x64.zip");
 
             using var response = await _http.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead, ct);
             response.EnsureSuccessStatusCode();
@@ -66,28 +71,41 @@ public static class UpdateInstallerService
                 }
             } // target disposed (and flushed) before validation opens the file again
 
-                using (var archive = ZipFile.OpenRead(zipPath))
-                {
-                    bool hasExe = archive.Entries.Any(e =>
-                        e.FullName == "FluentFlyout.exe" ||
-                        e.FullName.EndsWith("/FluentFlyout.exe", StringComparison.OrdinalIgnoreCase) ||
-                        e.FullName.EndsWith("\\FluentFlyout.exe", StringComparison.OrdinalIgnoreCase));
-                    if (!hasExe)
-                    {
-                        Logger.Error("Staged update package does not contain FluentFlyout.exe");
-                        return null;
-                    }
-                }
-
-                Logger.Info($"Update package staged: {zipPath}");
-                return zipPath;
-            }
-            catch (Exception ex)
+            using (var archive = ZipFile.OpenRead(zipPath))
             {
-                Logger.Error(ex, "Failed to download the update package");
-                return null;
+                bool hasExe = archive.Entries.Any(e =>
+                    e.FullName == "FluentFlyout.exe" ||
+                    e.FullName.EndsWith("/FluentFlyout.exe", StringComparison.OrdinalIgnoreCase) ||
+                    e.FullName.EndsWith("\\FluentFlyout.exe", StringComparison.OrdinalIgnoreCase));
+                if (!hasExe)
+                {
+                    Logger.Error("Staged update package does not contain FluentFlyout.exe");
+                    TryDeleteFile(zipPath);
+                    return null;
+                }
             }
+
+            Logger.Info($"Update package staged: {zipPath}");
+            return zipPath;
         }
+        catch (Exception ex)
+        {
+            Logger.Error(ex, "Failed to download the update package");
+            if (!string.IsNullOrEmpty(zipPath))
+                TryDeleteFile(zipPath);
+            return null;
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+        catch { /* best effort */ }
+    }
 
     /// <summary>
     /// Writes the detached helper script and launches it. The caller must exit the
@@ -104,6 +122,8 @@ public static class UpdateInstallerService
 
             const string template = """
 $ErrorActionPreference = 'Stop'
+$staging = $null
+$backup = $null
 try {
     $appDir   = <APPDIR>
     $exePath  = <EXE>
@@ -113,18 +133,31 @@ try {
     Start-Sleep -Milliseconds 800
     $staging = Join-Path $env:TEMP ('FFUpdate_' + [guid]::NewGuid().ToString('N'))
     Expand-Archive -Path $zipPath -DestinationPath $staging -Force
-    if (-not (Test-Path (Join-Path $staging 'FluentFlyout.exe'))) { throw 'invalid package' }
+    $exeFile = Get-ChildItem -Path $staging -Filter 'FluentFlyout.exe' -File -Recurse | Select-Object -First 1
+    if (-not $exeFile) { throw 'invalid package' }
+    $sourceRoot = $exeFile.DirectoryName
     $backup = Join-Path $appDir ('_old_' + (Get-Date -Format 'yyyyMMddHHmmss'))
     New-Item -ItemType Directory -Path $backup -Force | Out-Null
     Get-ChildItem $appDir -Force | Where-Object { $_.Name -notlike '_old_*' } | ForEach-Object {
         Move-Item -LiteralPath $_.FullName -Destination (Join-Path $backup $_.Name) -Force -ErrorAction SilentlyContinue
     }
-    Copy-Item (Join-Path $staging '*') $appDir -Recurse -Force
+    try {
+        Copy-Item (Join-Path $sourceRoot '*') $appDir -Recurse -Force
+    } catch {
+        Get-ChildItem $appDir -Force | Where-Object { $_.Name -notlike '_old_*' } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        Get-ChildItem $backup -Force | ForEach-Object {
+            Move-Item -LiteralPath $_.FullName -Destination (Join-Path $appDir $_.Name) -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
     Start-Process -FilePath $exePath -WorkingDirectory $appDir
     Start-Sleep -Seconds 4
     Remove-Item $backup -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue
 } catch {
+    if ($staging -and (Test-Path $staging)) {
+        Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue
+    }
     Start-Process '<RELEASES>'
 }
 """;

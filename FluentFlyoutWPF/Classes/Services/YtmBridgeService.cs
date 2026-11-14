@@ -20,26 +20,43 @@ public sealed class YtmBridgeService
 
     public static YtmBridgeService Instance { get; } = new();
 
+    private readonly Lock _clientLock = new();
+    private readonly SemaphoreSlim _authLock = new(1, 1);
     private HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(3) };
     private int _configuredPort = -1;
     private bool? _reachability;                    // last known plugin reachability
 
-    private static string BaseUrl =>
-        $"http://127.0.0.1:{FluentFlyout.Classes.Settings.SettingsManager.Current.YtmBridgePort}";
-
-    private HttpClient Client
+    private HttpClient? GetClient()
     {
-        get
+        int port = FluentFlyout.Classes.Settings.SettingsManager.Current.YtmBridgePort;
+        lock (_clientLock)
         {
-            int port = FluentFlyout.Classes.Settings.SettingsManager.Current.YtmBridgePort;
-            if (_configuredPort != port)
+            if (_configuredPort == port && _http.BaseAddress != null)
+                return _http;
+
+            if (port is < 1 or > 65535 || !Uri.TryCreate($"http://127.0.0.1:{port}", UriKind.Absolute, out var baseUri))
             {
-                _http.Dispose();
-                _http = new HttpClient { Timeout = TimeSpan.FromSeconds(3), BaseAddress = new Uri(BaseUrl) };
-                _configuredPort = port;
+                Logger.Debug("Invalid YTM bridge port: {0}", port);
+                return null;
             }
+
+            // Validate URI and construct new HttpClient before disposing the old one
+            var next = new HttpClient { Timeout = TimeSpan.FromSeconds(3), BaseAddress = baseUri };
+            var old = _http;
+            _http = next;
+            _configuredPort = port;
+            old.Dispose();
             return _http;
         }
+    }
+
+    private static void SaveSettingsOnUiThread()
+    {
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher == null || dispatcher.CheckAccess())
+            FluentFlyout.Classes.Settings.SettingsManager.SaveSettings();
+        else
+            dispatcher.BeginInvoke(() => FluentFlyout.Classes.Settings.SettingsManager.SaveSettings());
     }
 
     /// <summary>Last known plugin reachability, for settings UI status text.</summary>
@@ -50,17 +67,36 @@ public sealed class YtmBridgeService
         var settings = FluentFlyout.Classes.Settings.SettingsManager.Current;
         if (!string.IsNullOrEmpty(settings.YtmBridgeToken)) return true;
 
+        await _authLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            var resp = await Client.PostAsync($"/auth/{settings.YtmBridgeClientId}", null);
+            if (!string.IsNullOrEmpty(settings.YtmBridgeToken)) return true;
+
+            var client = GetClient();
+            if (client == null)
+            {
+                _reachability = false;
+                return false;
+            }
+
+            using var resp = await client.PostAsync($"/auth/{settings.YtmBridgeClientId}", null).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
             {
                 _reachability = false;
                 return false;
             }
-            var json = await resp.Content.ReadFromJsonAsync<JsonElement>();
-            settings.YtmBridgeToken = json.GetProperty("accessToken").GetString();
+            var json = await resp.Content.ReadFromJsonAsync<JsonElement>().ConfigureAwait(false);
+            string? accessToken = json.TryGetProperty("accessToken", out var tok) && tok.ValueKind == JsonValueKind.String
+                ? tok.GetString()
+                : null;
+            if (string.IsNullOrEmpty(accessToken))
+            {
+                _reachability = false;
+                return false;
+            }
+            settings.YtmBridgeToken = accessToken;
             _reachability = true;
+            SaveSettingsOnUiThread();
             Logger.Info("YTM bridge authorized");
             return true;
         }
@@ -70,23 +106,37 @@ public sealed class YtmBridgeService
             Logger.Debug(ex, "YTM bridge auth failed (plugin not running?)");
             return false;
         }
+        finally
+        {
+            _authLock.Release();
+        }
     }
 
     private async Task<JsonElement?> GetJsonAsync(string path)
     {
         try
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, path);
-            if (FluentFlyout.Classes.Settings.SettingsManager.Current.YtmBridgeToken is { } token)
-                req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
-            using var resp = await Client.SendAsync(req);
-            if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+            var client = GetClient();
+            if (client == null)
             {
-                FluentFlyout.Classes.Settings.SettingsManager.Current.YtmBridgeToken = null;
+                _reachability = false;
                 return null;
             }
+
+            using var req = new HttpRequestMessage(HttpMethod.Get, path);
+            if (FluentFlyout.Classes.Settings.SettingsManager.Current.YtmBridgeToken is { Length: > 0 } token)
+                req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            using var resp = await client.SendAsync(req).ConfigureAwait(false);
+            if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+            {
+                FluentFlyout.Classes.Settings.SettingsManager.Current.YtmBridgeToken = "";
+                SaveSettingsOnUiThread();
+                _reachability = false;
+                return null;
+            }
+            _reachability = resp.IsSuccessStatusCode;
             if (!resp.IsSuccessStatusCode) return null;
-            return await resp.Content.ReadFromJsonAsync<JsonElement>();
+            return await resp.Content.ReadFromJsonAsync<JsonElement>().ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -100,14 +150,23 @@ public sealed class YtmBridgeService
     {
         try
         {
+            var client = GetClient();
+            if (client == null)
+            {
+                _reachability = false;
+                return false;
+            }
+
             using var req = new HttpRequestMessage(HttpMethod.Post, path);
-            if (FluentFlyout.Classes.Settings.SettingsManager.Current.YtmBridgeToken is { } token)
+            if (FluentFlyout.Classes.Settings.SettingsManager.Current.YtmBridgeToken is { Length: > 0 } token)
                 req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
             if (body != null) req.Content = JsonContent.Create(body);
-            using var resp = await Client.SendAsync(req);
+            using var resp = await client.SendAsync(req).ConfigureAwait(false);
             if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized)
             {
-                FluentFlyout.Classes.Settings.SettingsManager.Current.YtmBridgeToken = null;
+                FluentFlyout.Classes.Settings.SettingsManager.Current.YtmBridgeToken = "";
+                SaveSettingsOnUiThread();
+                _reachability = false;
                 return false;
             }
             _reachability = resp.IsSuccessStatusCode;
@@ -196,7 +255,6 @@ public sealed class YtmBridgeService
                 _ => null,
             };
 
-        _reachability = shuffle.HasValue || repeat.HasValue;
         return (shuffle, repeat);
     }
 }

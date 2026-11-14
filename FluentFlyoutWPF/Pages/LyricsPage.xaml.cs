@@ -17,14 +17,21 @@ public partial class LyricsPage : Page
     {
         InitializeComponent();
         DataContext = SettingsManager.Current;
-        Loaded += (_, _) =>
-        {
-            LyricsMonitorSelector.RenderMonitors();
-            SessionStatusText.Text = SettingsManager.Current.LyricsYtmSession.Length > 0 ? "Session imported." : "";
-            UpdateDisabledSongsUi();
-        };
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        LyricsService.Instance.TrackDisabledStateChanged -= UpdateDisabledSongsUi;
         LyricsService.Instance.TrackDisabledStateChanged += UpdateDisabledSongsUi;
-        Unloaded += (_, _) => LyricsService.Instance.TrackDisabledStateChanged -= UpdateDisabledSongsUi;
+        SessionStatusText.Text = (SettingsManager.Current.LyricsYtmSession?.Length ?? 0) > 0 ? "Session imported." : "";
+        UpdateDisabledSongsUi();
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        LyricsService.Instance.TrackDisabledStateChanged -= UpdateDisabledSongsUi;
     }
 
     private void UpdateDisabledSongsUi()

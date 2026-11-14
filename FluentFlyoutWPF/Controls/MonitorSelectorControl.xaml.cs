@@ -5,6 +5,7 @@ using FluentFlyout.Classes.Settings;
 using FluentFlyoutWPF.Classes;
 using FluentFlyoutWPF.Classes.Utils;
 using FluentFlyoutWPF.Models;
+using Microsoft.Win32;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
@@ -40,6 +41,7 @@ public partial class MonitorSelectorControl : UserControl
     private readonly List<MonitorTaskbarSettings> _subscribedProfiles = [];
     private static readonly List<Window> _identifyWindows = [];
     private static DispatcherTimer? _identifyTimer;
+    private bool _renderPending;
 
     public MonitorSelectorControl()
     {
@@ -62,6 +64,8 @@ public partial class MonitorSelectorControl : UserControl
     {
         SettingsManager.Current.PropertyChanged -= OnUserSettingsPropertyChanged;
         SettingsManager.Current.PropertyChanged += OnUserSettingsPropertyChanged;
+        SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+        SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
 
         EnsureValidSelectedMonitor();
         SubscribeMonitorProfiles();
@@ -71,7 +75,37 @@ public partial class MonitorSelectorControl : UserControl
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         SettingsManager.Current.PropertyChanged -= OnUserSettingsPropertyChanged;
+        SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         UnsubscribeMonitorProfiles();
+    }
+
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (!IsLoaded)
+                return;
+
+            EnsureValidSelectedMonitor();
+            SubscribeMonitorProfiles();
+            RenderMonitors();
+        });
+    }
+
+    private void ScheduleRenderMonitors()
+    {
+        if (_renderPending)
+            return;
+
+        _renderPending = true;
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (!_renderPending)
+                return;
+            _renderPending = false;
+            if (IsLoaded)
+                RenderMonitors();
+        }, DispatcherPriority.Background);
     }
 
     private void EnsureValidSelectedMonitor()
@@ -126,7 +160,7 @@ public partial class MonitorSelectorControl : UserControl
             or nameof(SettingsManager.Current.LyricsEnabled)
             or nameof(SettingsManager.Current.IsPremiumUnlocked))
         {
-            Dispatcher.BeginInvoke(RenderMonitors);
+            ScheduleRenderMonitors();
         }
     }
 
@@ -136,7 +170,7 @@ public partial class MonitorSelectorControl : UserControl
             or nameof(MonitorTaskbarSettings.TaskbarVisualizerEnabled)
             or nameof(MonitorTaskbarSettings.LyricsEnabled))
         {
-            Dispatcher.BeginInvoke(RenderMonitors);
+            ScheduleRenderMonitors();
         }
     }
 
@@ -150,16 +184,27 @@ public partial class MonitorSelectorControl : UserControl
         };
     }
 
-    public void RenderMonitors()
+    private Brush GetThemeBrush(string resourceKey, Brush fallback)
     {
-        var monitors = MonitorUtil.GetMonitors();
-        MonitorsCanvas.Children.Clear();
+        return TryFindResource(resourceKey) as Brush
+            ?? Application.Current?.TryFindResource(resourceKey) as Brush
+            ?? fallback;
+    }
 
-        if (monitors.Count == 0)
-            return;
+    private Color GetThemeColor(string resourceKey, Color fallback)
+    {
+        if (GetThemeBrush(resourceKey, new SolidColorBrush(fallback)) is SolidColorBrush scb)
+            return scb.Color;
+        return fallback;
+    }
 
-        int selectedIdx = Math.Clamp(SettingsManager.Current.TaskbarWidgetSelectedMonitor, 0, monitors.Count - 1);
-
+    private static Rect[] ComputeNonOverlappingTileRects(
+        IReadOnlyList<MonitorUtil.MonitorInfo> monitors,
+        double canvasW,
+        double canvasH,
+        double availW,
+        double availH)
+    {
         double minX = monitors.Min(m => m.monitorArea.Left);
         double minY = monitors.Min(m => m.monitorArea.Top);
         double maxX = monitors.Max(m => m.monitorArea.Right);
@@ -168,23 +213,140 @@ public partial class MonitorSelectorControl : UserControl
         double totalW = Math.Max(1.0, maxX - minX);
         double totalH = Math.Max(1.0, maxY - minY);
 
+        double maxSingleMonitorH = monitors.Max(m => Math.Max(1.0, m.monitorArea.Height));
+        double scale = Math.Min(availW / totalW, availH / totalH);
+        scale = Math.Min(scale, 134.0 / maxSingleMonitorH);
+
+        const double minTileW = 110.0;
+        const double minTileH = 72.0;
+
+        var rects = new Rect[monitors.Count];
+        for (int i = 0; i < monitors.Count; i++)
+        {
+            var area = monitors[i].monitorArea;
+            double x = (area.Left - minX) * scale;
+            double y = (area.Top - minY) * scale;
+            double w = Math.Max(minTileW, area.Width * scale);
+            double h = Math.Max(minTileH, area.Height * scale);
+            rects[i] = new Rect(x, y, w, h);
+        }
+
+        // Push apart any tiles that overlap because one or more monitors were clamped to minTileW/minTileH
+        var order = Enumerable.Range(0, monitors.Count)
+            .OrderBy(i => monitors[i].monitorArea.Left)
+            .ThenBy(i => monitors[i].monitorArea.Top)
+            .ToArray();
+
+        for (int pass = 0; pass < monitors.Count; pass++)
+        {
+            bool moved = false;
+            for (int a = 0; a < order.Length; a++)
+            {
+                int i = order[a];
+                for (int b = a + 1; b < order.Length; b++)
+                {
+                    int j = order[b];
+                    if (!rects[i].IntersectsWith(rects[j]))
+                        continue;
+
+                    double overlapX = Math.Min(rects[i].Right, rects[j].Right) - Math.Max(rects[i].Left, rects[j].Left);
+                    double overlapY = Math.Min(rects[i].Bottom, rects[j].Bottom) - Math.Max(rects[i].Top, rects[j].Top);
+                    if (overlapX <= 0.5 || overlapY <= 0.5)
+                        continue;
+
+                    var mi = monitors[i].monitorArea;
+                    var mj = monitors[j].monitorArea;
+
+                    if (mj.Left >= mi.Right - 1)
+                    {
+                        rects[j] = new Rect(rects[i].Right, rects[j].Y, rects[j].Width, rects[j].Height);
+                        moved = true;
+                    }
+                    else if (mj.Top >= mi.Bottom - 1)
+                    {
+                        rects[j] = new Rect(rects[j].X, rects[i].Bottom, rects[j].Width, rects[j].Height);
+                        moved = true;
+                    }
+                    else if (mi.Top >= mj.Bottom - 1)
+                    {
+                        rects[i] = new Rect(rects[i].X, rects[j].Bottom, rects[i].Width, rects[i].Height);
+                        moved = true;
+                    }
+                    else if (overlapX <= overlapY)
+                    {
+                        rects[j] = new Rect(rects[i].Right, rects[j].Y, rects[j].Width, rects[j].Height);
+                        moved = true;
+                    }
+                    else
+                    {
+                        rects[j] = new Rect(rects[j].X, rects[i].Bottom, rects[j].Width, rects[j].Height);
+                        moved = true;
+                    }
+                }
+            }
+            if (!moved)
+                break;
+        }
+
+        // Uniformly fit into available canvas area if pushing apart expanded the group, then center
+        double gMinX = rects.Min(r => r.Left);
+        double gMinY = rects.Min(r => r.Top);
+        double gMaxX = rects.Max(r => r.Right);
+        double gMaxY = rects.Max(r => r.Bottom);
+        double gW = Math.Max(1.0, gMaxX - gMinX);
+        double gH = Math.Max(1.0, gMaxY - gMinY);
+
+        double fit = Math.Min(1.0, Math.Min(availW / gW, availH / gH));
+        double originX = (canvasW - gW * fit) / 2.0;
+        double originY = (canvasH - gH * fit) / 2.0;
+
+        for (int i = 0; i < rects.Length; i++)
+        {
+            var r = rects[i];
+            rects[i] = new Rect(
+                originX + (r.Left - gMinX) * fit,
+                originY + (r.Top - gMinY) * fit,
+                r.Width * fit,
+                r.Height * fit);
+        }
+
+        return rects;
+    }
+
+    public void RenderMonitors()
+    {
+        _renderPending = false;
+        var monitors = MonitorUtil.GetMonitors();
+        MonitorsCanvas.Children.Clear();
+
+        if (monitors.Count == 0)
+            return;
+
+        int selectedIdx = Math.Clamp(SettingsManager.Current.TaskbarWidgetSelectedMonitor, 0, monitors.Count - 1);
+
         double canvasW = MonitorsCanvas.ActualWidth > 20 ? MonitorsCanvas.ActualWidth : 680.0;
         double canvasH = MonitorsCanvas.ActualHeight > 20 ? MonitorsCanvas.ActualHeight : 164.0;
 
         double availW = Math.Max(220.0, canvasW - 24.0);
         double availH = Math.Max(100.0, canvasH - 12.0);
 
-        double maxSingleMonitorH = monitors.Max(m => Math.Max(1.0, m.monitorArea.Height));
-        double scale = Math.Min(availW / totalW, availH / totalH);
-        scale = Math.Min(scale, 134.0 / maxSingleMonitorH);
-
-        double scaledTotalW = totalW * scale;
-        double scaledTotalH = totalH * scale;
-
-        double originX = (canvasW - scaledTotalW) / 2.0;
-        double originY = (canvasH - scaledTotalH) / 2.0;
+        Rect[] tileRects = ComputeNonOverlappingTileRects(monitors, canvasW, canvasH, availW, availH);
 
         const double gapInset = 3.0;
+
+        Color accentColor = GetThemeColor("SystemAccentColorPrimary", Color.FromRgb(0x00, 0x78, 0xD4));
+        Color accentHoverColor = GetThemeColor("SystemAccentColorLight1", Color.FromRgb(0x10, 0x84, 0xDF));
+        Color accentMutedColor = Color.FromRgb(
+            (byte)(accentColor.R * 0.45 + 0x1A),
+            (byte)(accentColor.G * 0.45 + 0x1A),
+            (byte)(accentColor.B * 0.45 + 0x1A));
+        Color unselectedEnabledBg = GetThemeColor("ControlFillColorDefaultBrush", Color.FromRgb(0x33, 0x33, 0x33));
+        Color unselectedDisabledBg = GetThemeColor("ControlFillColorSecondaryBrush", Color.FromRgb(0x22, 0x22, 0x22));
+        Color unselectedHoverBg = GetThemeColor("ControlFillColorTertiaryBrush", Color.FromRgb(0x3E, 0x3E, 0x3E));
+        Color unselectedBorderColor = GetThemeColor("ControlStrokeColorDefaultBrush", Color.FromRgb(0x4C, 0x4C, 0x4C));
+        Brush unselectedPrimaryText = GetThemeBrush("TextFillColorPrimaryBrush", Brushes.White);
+        Brush unselectedSecondaryText = GetThemeBrush("TextFillColorSecondaryBrush", new SolidColorBrush(Color.FromArgb(0xB0, 0xFF, 0xFF, 0xFF)));
+        Brush selectedTextBrush = GetThemeBrush("TextOnAccentFillColorPrimaryBrush", Brushes.White);
 
         for (int i = 0; i < monitors.Count; i++)
         {
@@ -195,27 +357,26 @@ public partial class MonitorSelectorControl : UserControl
             bool isSelected = monitorIndex == selectedIdx;
             bool isEnabled = IsFeatureEnabledOnMonitor(profile);
 
-            double rawLeft = originX + (monitor.monitorArea.Left - minX) * scale;
-            double rawTop = originY + (monitor.monitorArea.Top - minY) * scale;
-            double rawW = Math.Max(110.0, monitor.monitorArea.Width * scale);
-            double rawH = Math.Max(72.0, monitor.monitorArea.Height * scale);
-
-            double tileLeft = rawLeft + gapInset;
-            double tileTop = rawTop + gapInset;
-            double tileW = Math.Max(96.0, rawW - gapInset * 2);
-            double tileH = Math.Max(64.0, rawH - gapInset * 2);
+            Rect rawRect = tileRects[i];
+            double tileLeft = rawRect.Left + gapInset;
+            double tileTop = rawRect.Top + gapInset;
+            double tileW = Math.Max(48.0, rawRect.Width - gapInset * 2);
+            double tileH = Math.Max(40.0, rawRect.Height - gapInset * 2);
 
             Color normalBgColor = isSelected
-                ? (isEnabled ? Color.FromRgb(0x00, 0x78, 0xD4) : Color.FromRgb(0x1B, 0x46, 0x6B))
-                : (isEnabled ? Color.FromRgb(0x33, 0x33, 0x33) : Color.FromRgb(0x22, 0x22, 0x22));
+                ? (isEnabled ? accentColor : accentMutedColor)
+                : (isEnabled ? unselectedEnabledBg : unselectedDisabledBg);
 
             Color hoverBgColor = isSelected
-                ? (isEnabled ? Color.FromRgb(0x10, 0x84, 0xDF) : Color.FromRgb(0x23, 0x55, 0x80))
-                : (isEnabled ? Color.FromRgb(0x3E, 0x3E, 0x3E) : Color.FromRgb(0x2B, 0x2B, 0x2B));
+                ? (isEnabled ? accentHoverColor : Color.FromRgb(
+                    (byte)Math.Min(255, accentMutedColor.R + 14),
+                    (byte)Math.Min(255, accentMutedColor.G + 14),
+                    (byte)Math.Min(255, accentMutedColor.B + 14)))
+                : unselectedHoverBg;
 
             Color borderColor = isSelected
-                ? (isEnabled ? Color.FromRgb(0x60, 0xCD, 0xFF) : Color.FromRgb(0x00, 0x78, 0xD4))
-                : (isEnabled ? Color.FromRgb(0x4C, 0x4C, 0x4C) : Color.FromRgb(0x36, 0x36, 0x36));
+                ? (isEnabled ? Color.FromRgb(0x60, 0xCD, 0xFF) : accentColor)
+                : unselectedBorderColor;
 
             var tileBgBrush = new SolidColorBrush(normalBgColor);
             var tileBorder = new Border
@@ -258,7 +419,7 @@ public partial class MonitorSelectorControl : UserControl
                         Text = "Primary",
                         FontSize = 9.5,
                         FontWeight = FontWeights.Medium,
-                        Foreground = new SolidColorBrush(Color.FromArgb(0xDD, 0xFF, 0xFF, 0xFF))
+                        Foreground = new SolidColorBrush(Color.FromArgb(0xEE, 0xFF, 0xFF, 0xFF))
                     }
                 };
                 innerGrid.Children.Add(primaryBadge);
@@ -328,7 +489,7 @@ public partial class MonitorSelectorControl : UserControl
             {
                 args.Handled = true;
                 SettingsManager.Current.SetMonitorFeatureEnabled(monitorIndex, FeatureMode, !isEnabled);
-                RenderMonitors();
+                ScheduleRenderMonitors();
             };
 
             innerGrid.Children.Add(togglePill);
@@ -339,7 +500,9 @@ public partial class MonitorSelectorControl : UserControl
                 Text = (monitorIndex + 1).ToString(),
                 FontSize = 23,
                 FontWeight = FontWeights.SemiBold,
-                Foreground = new SolidColorBrush(isEnabled ? Colors.White : Color.FromArgb(0xB0, 0xFF, 0xFF, 0xFF)),
+                Foreground = isSelected
+                    ? selectedTextBrush
+                    : (isEnabled ? unselectedPrimaryText : unselectedSecondaryText),
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 0, 4)
@@ -351,7 +514,9 @@ public partial class MonitorSelectorControl : UserControl
             {
                 Text = $"{(int)monitor.monitorArea.Width}×{(int)monitor.monitorArea.Height}",
                 FontSize = 10,
-                Foreground = new SolidColorBrush(Color.FromArgb(0xC0, 0xFF, 0xFF, 0xFF)),
+                Foreground = isSelected
+                    ? new SolidColorBrush(Color.FromArgb(0xD8, 0xFF, 0xFF, 0xFF))
+                    : unselectedSecondaryText,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Bottom,
                 Margin = new Thickness(6, 0, 6, 5),
@@ -394,50 +559,83 @@ public partial class MonitorSelectorControl : UserControl
         };
     }
 
-    private static void StyleFeatureButton(Button button, string label, bool isOn, bool isCurrentPageFeature)
+    private void StyleFeatureButton(Button button, string label, bool isOn, bool isCurrentPageFeature)
     {
         button.Content = $"{(isOn ? "●" : "○")} {label}: {(isOn ? "On" : "Off")}";
-        button.Background = new SolidColorBrush(
-            isOn
-                ? (isCurrentPageFeature ? Color.FromRgb(0x00, 0x78, 0xD4) : Color.FromRgb(0x2D, 0x4A, 0x3E))
-                : Color.FromRgb(0x2D, 0x2D, 0x2D));
-        button.BorderBrush = new SolidColorBrush(
-            isCurrentPageFeature
-                ? Color.FromRgb(0x60, 0xCD, 0xFF)
-                : (isOn ? Color.FromRgb(0x4A, 0xDE, 0x80) : Color.FromRgb(0x44, 0x44, 0x44)));
-        button.Foreground = Brushes.White;
+        if (isOn)
+        {
+            if (isCurrentPageFeature)
+            {
+                button.Background = GetThemeBrush("AccentFillColorDefaultBrush", new SolidColorBrush(Color.FromRgb(0x00, 0x78, 0xD4)));
+                button.BorderBrush = GetThemeBrush("AccentFillColorSecondaryBrush", new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF)));
+                button.Foreground = GetThemeBrush("TextOnAccentFillColorPrimaryBrush", Brushes.White);
+            }
+            else
+            {
+                button.Background = GetThemeBrush("ControlFillColorDefaultBrush", new SolidColorBrush(Color.FromRgb(0x2D, 0x4A, 0x3E)));
+                button.BorderBrush = GetThemeBrush("SystemFillColorSuccessBrush", new SolidColorBrush(Color.FromRgb(0x4A, 0xDE, 0x80)));
+                button.Foreground = GetThemeBrush("TextFillColorPrimaryBrush", Brushes.White);
+            }
+        }
+        else
+        {
+            button.Background = GetThemeBrush("ControlFillColorDefaultBrush", new SolidColorBrush(Color.FromRgb(0x2D, 0x2D, 0x2D)));
+            button.BorderBrush = GetThemeBrush("ControlStrokeColorDefaultBrush", new SolidColorBrush(Color.FromRgb(0x44, 0x44, 0x44)));
+            button.Foreground = GetThemeBrush("TextFillColorPrimaryBrush", Brushes.White);
+        }
+    }
+
+    private int GetClampedSelectedMonitorIndex()
+    {
+        var monitors = MonitorUtil.GetMonitors();
+        if (monitors.Count == 0)
+            return -1;
+
+        int idx = Math.Clamp(SettingsManager.Current.TaskbarWidgetSelectedMonitor, 0, monitors.Count - 1);
+        if (idx != SettingsManager.Current.TaskbarWidgetSelectedMonitor)
+            SettingsManager.Current.TaskbarWidgetSelectedMonitor = idx;
+        return idx;
     }
 
     private void ToggleWidgetButton_Click(object sender, RoutedEventArgs e)
     {
-        int idx = SettingsManager.Current.TaskbarWidgetSelectedMonitor;
+        int idx = GetClampedSelectedMonitorIndex();
+        if (idx < 0)
+            return;
+
         var profile = SettingsManager.Current.GetMonitorSettings(idx);
         SettingsManager.Current.SetMonitorFeatureEnabled(idx, "Widget", !profile.TaskbarWidgetEnabled);
-        RenderMonitors();
+        ScheduleRenderMonitors();
     }
 
     private void ToggleVisualizerButton_Click(object sender, RoutedEventArgs e)
     {
-        int idx = SettingsManager.Current.TaskbarWidgetSelectedMonitor;
+        int idx = GetClampedSelectedMonitorIndex();
+        if (idx < 0)
+            return;
+
         var profile = SettingsManager.Current.GetMonitorSettings(idx);
         bool currentlyOn = profile.TaskbarWidgetEnabled && profile.TaskbarVisualizerEnabled;
         SettingsManager.Current.SetMonitorFeatureEnabled(idx, "Visualizer", !currentlyOn);
-        RenderMonitors();
+        ScheduleRenderMonitors();
     }
 
     private void ToggleLyricsButton_Click(object sender, RoutedEventArgs e)
     {
-        int idx = SettingsManager.Current.TaskbarWidgetSelectedMonitor;
+        int idx = GetClampedSelectedMonitorIndex();
+        if (idx < 0)
+            return;
+
         var profile = SettingsManager.Current.GetMonitorSettings(idx);
         bool currentlyOn = profile.TaskbarWidgetEnabled && profile.LyricsEnabled;
         SettingsManager.Current.SetMonitorFeatureEnabled(idx, "Lyrics", !currentlyOn);
-        RenderMonitors();
+        ScheduleRenderMonitors();
     }
 
     private void CopyToAllButton_Click(object sender, RoutedEventArgs e)
     {
         SettingsManager.Current.CopyCurrentMonitorSettingsToAll(MonitorUtil.GetMonitors().Count);
-        RenderMonitors();
+        ScheduleRenderMonitors();
     }
 
     private void IdentifyButton_Click(object sender, RoutedEventArgs e)

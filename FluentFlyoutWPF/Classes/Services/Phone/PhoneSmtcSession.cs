@@ -21,6 +21,7 @@ public sealed class PhoneSmtcSession : IDisposable
     private global::Windows.Media.Playback.MediaPlayer? _mediaPlayer;
     private SystemMediaTransportControls? _smtc;
     private readonly SemaphoreSlim _updateLock = new(1, 1);
+    private volatile bool _disposed;
 
     /// <summary>Runs on a threadpool thread for each system transport button press.</summary>
     public event Action<SystemMediaTransportControlsButton>? ButtonPressed;
@@ -31,6 +32,7 @@ public sealed class PhoneSmtcSession : IDisposable
 
     public void Start()
     {
+        if (_disposed) return;
         Stop();
         try
         {
@@ -45,19 +47,18 @@ public sealed class PhoneSmtcSession : IDisposable
             _smtc.IsPauseEnabled = true;
             _smtc.IsNextEnabled = true;
             _smtc.IsPreviousEnabled = true;
-            _smtc.IsStopEnabled = true;
             _smtc.ShuffleEnabled = false;
             _smtc.AutoRepeatMode = MediaPlaybackAutoRepeatMode.None;
             _smtc.PlaybackStatus = MediaPlaybackStatus.Closed;   // hidden until the phone connects
 
-            _smtc.ShuffleEnabledChangeRequested += (_, _) => DispatchRequest("shuffle");
-            _smtc.AutoRepeatModeChangeRequested += (_, args) => DispatchRequest(args.RequestedAutoRepeatMode.ToString());
+            _smtc.ShuffleEnabledChangeRequested += OnShuffleEnabledChangeRequested;
+            _smtc.AutoRepeatModeChangeRequested += OnAutoRepeatModeChangeRequested;
 
             var cm = _mediaPlayer.CommandManager;
-            cm.PlayReceived += (_, _) => Dispatch(SystemMediaTransportControlsButton.Play);
-            cm.PauseReceived += (_, _) => Dispatch(SystemMediaTransportControlsButton.Pause);
-            cm.NextReceived += (_, _) => Dispatch(SystemMediaTransportControlsButton.Next);
-            cm.PreviousReceived += (_, _) => Dispatch(SystemMediaTransportControlsButton.Previous);
+            cm.PlayReceived += OnPlayReceived;
+            cm.PauseReceived += OnPauseReceived;
+            cm.NextReceived += OnNextReceived;
+            cm.PreviousReceived += OnPreviousReceived;
 
             Logger.Info("Phone SMTC session created");
         }
@@ -68,6 +69,24 @@ public sealed class PhoneSmtcSession : IDisposable
             _mediaPlayer = null;
         }
     }
+
+    private void OnShuffleEnabledChangeRequested(SystemMediaTransportControls sender, ShuffleEnabledChangeRequestedEventArgs args)
+        => DispatchRequest("shuffle");
+
+    private void OnAutoRepeatModeChangeRequested(SystemMediaTransportControls sender, AutoRepeatModeChangeRequestedEventArgs args)
+        => DispatchRequest(args.RequestedAutoRepeatMode.ToString());
+
+    private void OnPlayReceived(global::Windows.Media.Playback.MediaPlaybackCommandManager sender, global::Windows.Media.Playback.MediaPlaybackCommandManagerPlayReceivedEventArgs args)
+        => Dispatch(SystemMediaTransportControlsButton.Play);
+
+    private void OnPauseReceived(global::Windows.Media.Playback.MediaPlaybackCommandManager sender, global::Windows.Media.Playback.MediaPlaybackCommandManagerPauseReceivedEventArgs args)
+        => Dispatch(SystemMediaTransportControlsButton.Pause);
+
+    private void OnNextReceived(global::Windows.Media.Playback.MediaPlaybackCommandManager sender, global::Windows.Media.Playback.MediaPlaybackCommandManagerNextReceivedEventArgs args)
+        => Dispatch(SystemMediaTransportControlsButton.Next);
+
+    private void OnPreviousReceived(global::Windows.Media.Playback.MediaPlaybackCommandManager sender, global::Windows.Media.Playback.MediaPlaybackCommandManagerPreviousReceivedEventArgs args)
+        => Dispatch(SystemMediaTransportControlsButton.Previous);
 
     private void DispatchRequest(string request)
     {
@@ -96,18 +115,31 @@ public sealed class PhoneSmtcSession : IDisposable
     /// <summary>Must be fire-and-forget; serialized so updater state can't interleave.</summary>
     public async Task UpdateMetadataAsync(string? title, string? artist, string? album, byte[]? coverBytes)
     {
-        var smtc = _smtc;
-        if (smtc == null) return;
+        if (_disposed || _smtc == null) return;
         try
         {
             await _updateLock.WaitAsync().ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            return;
+        }
+
+        try
+        {
+            if (_disposed) return;
+            var smtc = _smtc;
+            if (smtc == null) return;
+
             var updater = smtc.DisplayUpdater;
             updater.Type = MediaPlaybackType.Music;
             updater.MusicProperties.Title = title ?? "";
             updater.MusicProperties.Artist = artist ?? "";
             updater.MusicProperties.AlbumTitle = album ?? "";
-            if (coverBytes is { Length: > 0 })
-                updater.Thumbnail = await BytesToReferenceAsync(coverBytes).ConfigureAwait(false);
+            updater.Thumbnail = coverBytes is { Length: > 0 }
+                ? await BytesToReferenceAsync(coverBytes).ConfigureAwait(false)
+                : null;
+            if (_disposed || !ReferenceEquals(_smtc, smtc)) return;
             updater.Update();
         }
         catch (Exception ex)
@@ -116,16 +148,19 @@ public sealed class PhoneSmtcSession : IDisposable
         }
         finally
         {
-            _updateLock.Release();
+            try { _updateLock.Release(); } catch (ObjectDisposedException) { }
         }
     }
 
     private static async Task<RandomAccessStreamReference> BytesToReferenceAsync(byte[] bytes)
     {
         var stream = new InMemoryRandomAccessStream();
-        using var writer = new DataWriter(stream);
-        writer.WriteBytes(bytes);
-        await writer.StoreAsync();
+        using (var writer = new DataWriter(stream))
+        {
+            writer.WriteBytes(bytes);
+            await writer.StoreAsync();
+            writer.DetachStream();
+        }
         stream.Seek(0);
         return RandomAccessStreamReference.CreateFromStream(stream);
     }
@@ -196,15 +231,63 @@ public sealed class PhoneSmtcSession : IDisposable
 
     public void Stop()
     {
+        bool lockTaken = false;
         try
         {
-            if (_smtc != null) _smtc.PlaybackStatus = MediaPlaybackStatus.Closed;
-            _mediaPlayer?.Dispose();
+            // Wait for any in-flight UpdateMetadataAsync so _mediaPlayer isn't disposed mid-update
+            try
+            {
+                _updateLock.Wait();
+                lockTaken = true;
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+
+            var smtc = _smtc;
+            var mp = _mediaPlayer;
+            _smtc = null;
+            _mediaPlayer = null;
+
+            if (smtc != null)
+            {
+                try
+                {
+                    smtc.ShuffleEnabledChangeRequested -= OnShuffleEnabledChangeRequested;
+                    smtc.AutoRepeatModeChangeRequested -= OnAutoRepeatModeChangeRequested;
+                    smtc.PlaybackStatus = MediaPlaybackStatus.Closed;
+                }
+                catch { }
+            }
+
+            if (mp != null)
+            {
+                try
+                {
+                    var cm = mp.CommandManager;
+                    cm.PlayReceived -= OnPlayReceived;
+                    cm.PauseReceived -= OnPauseReceived;
+                    cm.NextReceived -= OnNextReceived;
+                    cm.PreviousReceived -= OnPreviousReceived;
+                }
+                catch { }
+                try { mp.Dispose(); } catch { }
+            }
         }
-        catch { }
-        _smtc = null;
-        _mediaPlayer = null;
+        finally
+        {
+            if (lockTaken)
+            {
+                try { _updateLock.Release(); } catch (ObjectDisposedException) { }
+            }
+        }
     }
 
-    public void Dispose() => Stop();
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        Stop();
+        _updateLock.Dispose();
+    }
 }

@@ -27,7 +27,8 @@ internal class FullscreenDetector
 
             if (result != 0) // 0 means SUCCESS
             {
-                throw new Exception($"SHQueryUserNotificationState failed with error code: {result}");
+                Logger.Warn($"SHQueryUserNotificationState failed with error code: {result}");
+                return false;
             }
 
             return state == QUERY_USER_NOTIFICATION_STATE.QUNS_RUNNING_D3D_FULL_SCREEN;

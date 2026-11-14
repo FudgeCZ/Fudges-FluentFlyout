@@ -1,6 +1,8 @@
 // Copyright (c) 2024-2026 The FluentFlyout Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+using System.Buffers;
+using System.Buffers.Binary;
 using System.IO;
 using System.Net.Sockets;
 
@@ -16,41 +18,62 @@ public static class PhoneFrameProtocol
     public const byte TypeJson = 1;
     public const byte TypePcm = 2;
     public const byte TypeCover = 3;
+    private const int HeaderSize = 5;
     private const int MaxFrame = 8 * 1024 * 1024;
 
     public static async Task<(byte Type, byte[] Payload)> ReadFrameAsync(NetworkStream stream, CancellationToken ct)
     {
-        var header = await ReadExactAsync(stream, 5, ct).ConfigureAwait(false);
-        uint len = (uint)(header[0] << 24 | header[1] << 16 | header[2] << 8 | header[3]);
+        uint len;
+        byte type;
+        byte[] header = ArrayPool<byte>.Shared.Rent(HeaderSize);
+        try
+        {
+            await ReadExactAsync(stream, header.AsMemory(0, HeaderSize), ct).ConfigureAwait(false);
+            len = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(0, 4));
+            type = header[4];
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(header);
+        }
+
         if (len > MaxFrame) throw new IOException($"frame too large: {len}");
-        byte type = header[4];
-        byte[] payload = len == 0 ? Array.Empty<byte>() : await ReadExactAsync(stream, (int)len, ct).ConfigureAwait(false);
+        if (len == 0) return (type, Array.Empty<byte>());
+
+        byte[] payload = new byte[(int)len];
+        await ReadExactAsync(stream, payload.AsMemory(), ct).ConfigureAwait(false);
         return (type, payload);
     }
 
     public static async Task WriteFrameAsync(NetworkStream stream, byte type, byte[] payload, CancellationToken ct)
     {
         if (payload.Length > MaxFrame) throw new IOException($"frame too large to send: {payload.Length}");
-        var header = new byte[5]
+        int totalLen = HeaderSize + payload.Length;
+        byte[] frame = ArrayPool<byte>.Shared.Rent(totalLen);
+        try
         {
-            (byte)(payload.Length >> 24), (byte)(payload.Length >> 16),
-            (byte)(payload.Length >> 8), (byte)payload.Length, type,
-        };
-        await stream.WriteAsync(header, ct).ConfigureAwait(false);
-        if (payload.Length > 0) await stream.WriteAsync(payload, ct).ConfigureAwait(false);
-        await stream.FlushAsync(ct).ConfigureAwait(false);
+            BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(0, 4), payload.Length);
+            frame[4] = type;
+            if (payload.Length > 0)
+                payload.AsSpan().CopyTo(frame.AsSpan(HeaderSize));
+
+            await stream.WriteAsync(frame.AsMemory(0, totalLen), ct).ConfigureAwait(false);
+            await stream.FlushAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(frame);
+        }
     }
 
-    private static async Task<byte[]> ReadExactAsync(NetworkStream stream, int count, CancellationToken ct)
+    private static async Task ReadExactAsync(NetworkStream stream, Memory<byte> dest, CancellationToken ct)
     {
-        var buf = new byte[count];
         int read = 0;
-        while (read < count)
+        while (read < dest.Length)
         {
-            int n = await stream.ReadAsync(buf.AsMemory(read, count - read), ct).ConfigureAwait(false);
+            int n = await stream.ReadAsync(dest[read..], ct).ConfigureAwait(false);
             if (n <= 0) throw new IOException("socket closed");
             read += n;
         }
-        return buf;
     }
 }

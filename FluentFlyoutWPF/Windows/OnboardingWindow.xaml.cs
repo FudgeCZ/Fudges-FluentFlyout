@@ -29,7 +29,7 @@ public partial class OnboardingWindow : MicaWindow
 
             instance.Activate();
             instance.Focus();
-            Close();
+            Loaded += (_, _) => Close();
             return;
         }
 
@@ -37,19 +37,16 @@ public partial class OnboardingWindow : MicaWindow
         InitializeComponent();
         instance = this;
 
-        Closed += (_, _) =>
-        {
-            instance = null;
-            // open settings window when onboarding is closed or finished
-            OnOnboardingCompleted(Owner, EventArgs.Empty);
-        };
-        _viewModel.Completed += (_, _) => Close();
+        Closed += OnWindowClosed;
+        _viewModel.Completed += OnViewModelCompleted;
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
 
         // Show loading ring for 0.5 seconds to prevent WPF-UI color flickers
         Loaded += async (_, _) =>
         {
             await Task.Delay(500);
+            if (instance != this) return;
+
             _viewModel.IsLoading = false;
 
             FluentFlyout.Classes.LicenseManager.GetPremiumProductInfo();
@@ -161,11 +158,29 @@ public partial class OnboardingWindow : MicaWindow
         }
     }
 
-    private void OnOnboardingCompleted(object? sender, EventArgs e)
+    private void OnViewModelCompleted(object? sender, EventArgs e)
+    {
+        Close();
+    }
+
+    private void OnWindowClosed(object? sender, EventArgs e)
+    {
+        Closed -= OnWindowClosed;
+        _viewModel.Completed -= OnViewModelCompleted;
+        _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
+
+        if (instance == this)
+        {
+            instance = null;
+            // open settings window when onboarding is closed or finished
+            OnOnboardingCompleted();
+        }
+    }
+
+    private void OnOnboardingCompleted()
     {
         _ = TelemetryService.SendTelemetryEventAsync("onboarding_completed", "onboarding");
 
         SettingsWindow.ShowInstance();
-        Close();
     }
 }

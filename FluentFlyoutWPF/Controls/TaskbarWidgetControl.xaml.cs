@@ -77,6 +77,8 @@ public partial class TaskbarWidgetControl : UserControl
     private bool _isPaused;
     private bool _isVertical;
     private bool _isSmallTaskbar;
+    private DispatcherTimer? _coverFadeTimer;
+    private int _slideOutGeneration;
 
     /// <summary>
     /// External upper bound for the total logical width (logical DIPs), set by
@@ -96,7 +98,35 @@ public partial class TaskbarWidgetControl : UserControl
         ApplyWindowsTheme();
 
         BindMonitorSettings(SettingsManager.Current.GetMonitorSettings(0));
-        Unloaded += (_, _) => Settings.PropertyChanged -= Settings_PropertyChanged;
+        Loaded += (_, _) =>
+        {
+            Settings.PropertyChanged -= Settings_PropertyChanged;
+            Settings.PropertyChanged += Settings_PropertyChanged;
+            if (IsVisible && Settings.TaskbarWidgetProgressBarEnabled && _progressDuration > TimeSpan.Zero)
+            {
+                UpdateProgressFill();
+                SubscribeProgressRendering(_progressPlaying);
+            }
+        };
+        Unloaded += (_, _) =>
+        {
+            Settings.PropertyChanged -= Settings_PropertyChanged;
+            StopProgressTimer();
+            _coverFadeTimer?.Stop();
+            _coverFadeTimer = null;
+        };
+        IsVisibleChanged += (_, _) =>
+        {
+            if (!IsVisible)
+            {
+                StopProgressTimer();
+            }
+            else if (Settings.TaskbarWidgetProgressBarEnabled && _progressDuration > TimeSpan.Zero)
+            {
+                UpdateProgressFill();
+                SubscribeProgressRendering(_progressPlaying);
+            }
+        };
 
         MainBorder.SizeChanged += (s, e) =>
         {
@@ -112,9 +142,6 @@ public partial class TaskbarWidgetControl : UserControl
         }
 
         Background = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0));
-
-        // Initialize control order
-        ReorderControls();
     }
 
     public void BindMonitorSettings(MonitorTaskbarSettings settings)
@@ -157,6 +184,11 @@ public partial class TaskbarWidgetControl : UserControl
             TimeText.Visibility = Settings.TaskbarWidgetTimeEnabled
                 && !_isVertical && !string.IsNullOrEmpty(_timeText)
                 ? Visibility.Visible : Visibility.Collapsed;
+        }
+        else if (e.PropertyName == nameof(MonitorTaskbarSettings.TaskbarWidgetControlsEnabled))
+        {
+            if (!string.IsNullOrEmpty(_actualTitle))
+                ControlsStackPanel.ClearValue(VisibilityProperty);
         }
     }
 
@@ -358,8 +390,7 @@ public partial class TaskbarWidgetControl : UserControl
             foreach (var button in new[] { ShuffleButton, PreviousButton, PlayPauseButton, NextButton, RepeatButton })
                 if (button.Visibility == Visibility.Visible)
                     extrasWidth += button.Width;
-            if (!_isVertical)
-                extrasWidth += ControlsStackPanel.Margin.Left + ControlsStackPanel.Margin.Right;
+            extrasWidth += ControlsStackPanel.Margin.Left + ControlsStackPanel.Margin.Right;
         }
         if (Settings.TaskbarWidgetTimeEnabled && !_isVertical && !string.IsNullOrEmpty(_timeText))
             extrasWidth += StringWidth.GetStringWidth(_timeText, 400) + TimeText.Margin.Left + TimeText.Margin.Right + 2;
@@ -460,7 +491,7 @@ public partial class TaskbarWidgetControl : UserControl
     {
         if (textBlock.RenderTransform as TranslateTransform is not { } transform) return;
 
-        int speed = Settings.TaskbarWidgetScrollingTextSpeed;
+        int speed = Settings.TaskbarWidgetScrollingTextSpeed > 0 ? Settings.TaskbarWidgetScrollingTextSpeed : 20;
         bool loopForever = Settings.TaskbarWidgetScrollingTextLoopForever;
         bool isTitle = textBlock == SongTitle;
         double containerWidth = container.Width;
@@ -606,6 +637,7 @@ public partial class TaskbarWidgetControl : UserControl
         {
             if (Visibility != Visibility.Visible) return;
 
+            int gen = ++_slideOutGeneration;
             var translate = MainBorder.RenderTransform as TranslateTransform ?? new TranslateTransform();
             MainBorder.RenderTransform = translate;
 
@@ -615,7 +647,11 @@ public partial class TaskbarWidgetControl : UserControl
             };
             slide.Completed += (_, _) =>
             {
+                if (gen != _slideOutGeneration)
+                    return;
+
                 Visibility = Visibility.Collapsed;
+                StopProgressTimer();
                 translate.BeginAnimation(TranslateTransform.YProperty, null);
                 translate.Y = 0;
             };
@@ -628,6 +664,7 @@ public partial class TaskbarWidgetControl : UserControl
 
     private void ResetSlideOutState()
     {
+        _slideOutGeneration++;
         MainBorder.BeginAnimation(OpacityProperty, null);
         MainBorder.Opacity = 1;
         if (MainBorder.RenderTransform is TranslateTransform translate)
@@ -639,7 +676,7 @@ public partial class TaskbarWidgetControl : UserControl
 
     public void UpdateUi(string title, string artist, BitmapImage? icon, GlobalSystemMediaTransportControlsSessionPlaybackStatus? playbackStatus, GlobalSystemMediaTransportControlsSessionPlaybackControls? playbackControls = null)
     {
-        if (title == "-" && artist == "-")
+        if ((title == "-" && artist == "-") || playbackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed)
         {
             // No media playing, hide UI
             Dispatcher.Invoke(() =>
@@ -649,8 +686,14 @@ public partial class TaskbarWidgetControl : UserControl
                 _songInfoTooltip = string.Empty;
                 _appVolume = null;
                 _timeText = string.Empty;
+                _progressDuration = TimeSpan.Zero;
+                _progressPlaying = false;
                 TimeText.Text = string.Empty;
                 TimeText.Visibility = Visibility.Collapsed;
+                ProgressBarHost.Visibility = Visibility.Collapsed;
+                StopProgressTimer();
+                _coverFadeTimer?.Stop();
+                _coverFadeTimer = null;
                 UpdateShuffleRepeat(null, null);
 
                 if (Settings.TaskbarWidgetHideCompletely)
@@ -744,11 +787,12 @@ public partial class TaskbarWidgetControl : UserControl
                 if (Settings.TaskbarWidgetAnimated)
                 {
                     var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
-                    var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(220)) { EasingFunction = ease };
+                    var titleFade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(220)) { EasingFunction = ease };
+                    var artistFade = new DoubleAnimation(0, 0.5, TimeSpan.FromMilliseconds(220)) { EasingFunction = ease };
                     var rise = new DoubleAnimation(6, 0, TimeSpan.FromMilliseconds(220)) { EasingFunction = ease };
 
-                    SongTitle.BeginAnimation(OpacityProperty, fade);
-                    SongArtist.BeginAnimation(OpacityProperty, fade);
+                    SongTitle.BeginAnimation(OpacityProperty, titleFade);
+                    SongArtist.BeginAnimation(OpacityProperty, artistFade);
                     if (SongTitle.RenderTransform is TranslateTransform tt)
                         tt.BeginAnimation(TranslateTransform.YProperty, rise);
                     if (SongArtist.RenderTransform is TranslateTransform ta)
@@ -765,7 +809,11 @@ public partial class TaskbarWidgetControl : UserControl
 
             if (Settings.TaskbarWidgetControlsEnabled)
             {
-                PlayPauseButton.Icon = _isPaused ? new SymbolIcon(SymbolRegular.Play24, filled: true) : new SymbolIcon(SymbolRegular.Pause24, filled: true);
+                SymbolRegular targetPlaySymbol = _isPaused ? SymbolRegular.Play24 : SymbolRegular.Pause24;
+                if (PlayPauseButton.Icon is not SymbolIcon currentPlayIcon || currentPlayIcon.Symbol != targetPlaySymbol || !currentPlayIcon.Filled)
+                {
+                    PlayPauseButton.Icon = new SymbolIcon(targetPlaySymbol, filled: true);
+                }
 
                 // pulse the button when the play/pause state flips
                 if (_lastPlayPauseState.HasValue && _lastPlayPauseState.Value != _isPaused)
@@ -799,6 +847,12 @@ public partial class TaskbarWidgetControl : UserControl
             }
             else
             {
+                _coverFadeTimer?.Stop();
+                _coverFadeTimer = null;
+                SongImageFadeBrush.ImageSource = null;
+                SongImageFade.BeginAnimation(OpacityProperty, null);
+                SongImageFade.Opacity = 0;
+
                 if (_pauseOverlayShown)
                     AnimatePauseOverlay(false);
                 SongImagePlaceholder.Symbol = SymbolRegular.MusicNote220;
@@ -814,10 +868,8 @@ public partial class TaskbarWidgetControl : UserControl
             SongInfoStackPanel.Visibility = _isVertical ? Visibility.Collapsed : Visibility.Visible;
             BackgroundImage.Visibility = Settings.TaskbarWidgetBackgroundBlur ? Visibility.Visible : Visibility.Collapsed;
 
-            // on top of XAML visibility binding (XAML binding only hides when disabled in settings)
-            ControlsStackPanel.Visibility = Settings.TaskbarWidgetControlsEnabled
-                ? Visibility.Visible
-                : Visibility.Collapsed;
+            // Let XAML Style + DataTrigger govern ControlsStackPanel visibility when playing
+            ControlsStackPanel.ClearValue(VisibilityProperty);
 
             Visibility = Visibility.Visible;
         });
@@ -926,16 +978,24 @@ public partial class TaskbarWidgetControl : UserControl
             _repeatAvailableOverride = repeatAvailable;
 
             bool shuffleOn = shuffleActive == true;
-            ShuffleButton.Icon = new SymbolIcon(shuffleOn ? SymbolRegular.ArrowShuffle24 : SymbolRegular.ArrowShuffleOff24, filled: shuffleOn);
+            SymbolRegular shuffleSymbol = shuffleOn ? SymbolRegular.ArrowShuffle24 : SymbolRegular.ArrowShuffleOff24;
+            if (ShuffleButton.Icon is not SymbolIcon currentShuffleIcon || currentShuffleIcon.Symbol != shuffleSymbol || currentShuffleIcon.Filled != shuffleOn)
+            {
+                ShuffleButton.Icon = new SymbolIcon(shuffleSymbol, filled: shuffleOn);
+            }
             if (shuffleAvailable.HasValue) ShuffleButton.IsHitTestVisible = shuffleAvailable.Value;
             ShuffleButton.Opacity = shuffleOn ? 1 : (shuffleAvailable == true ? 0.75 : 0.6);
 
-            RepeatButton.Icon = repeatMode switch
+            (SymbolRegular repeatSymbol, bool repeatFilled) = repeatMode switch
             {
-                1 => new SymbolIcon(SymbolRegular.ArrowRepeatAll24, filled: true),
-                2 => new SymbolIcon(SymbolRegular.ArrowRepeat124, filled: true),
-                _ => new SymbolIcon(SymbolRegular.ArrowRepeatAllOff24),
+                1 => (SymbolRegular.ArrowRepeatAll24, true),
+                2 => (SymbolRegular.ArrowRepeat124, true),
+                _ => (SymbolRegular.ArrowRepeatAllOff24, false),
             };
+            if (RepeatButton.Icon is not SymbolIcon currentRepeatIcon || currentRepeatIcon.Symbol != repeatSymbol || currentRepeatIcon.Filled != repeatFilled)
+            {
+                RepeatButton.Icon = new SymbolIcon(repeatSymbol, filled: repeatFilled);
+            }
             if (repeatAvailable.HasValue) RepeatButton.IsHitTestVisible = repeatAvailable.Value;
             RepeatButton.Opacity = repeatMode is 1 or 2 ? 1 : (repeatAvailable == true ? 0.75 : 0.6);
         });
@@ -955,7 +1015,7 @@ public partial class TaskbarWidgetControl : UserControl
                 if (_lastTimeText != null && minuteOf(_lastTimeText) != minuteOf(text))
                 {
                     TimeTextRoll.BeginAnimation(TranslateTransform.YProperty,
-                        new DoubleAnimation(5, TimeSpan.FromMilliseconds(160)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
+                        new DoubleAnimation(5, 0, TimeSpan.FromMilliseconds(160)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
                 }
             }
             _lastTimeText = text;
@@ -973,6 +1033,12 @@ public partial class TaskbarWidgetControl : UserControl
     /// </summary>
     public void SetTimeline(TimeSpan position, DateTime lastUpdated, bool playing, TimeSpan duration)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(() => SetTimeline(position, lastUpdated, playing, duration));
+            return;
+        }
+
         _progressPosition = position;
         _progressUpdated = lastUpdated;
         _progressPlaying = playing;
@@ -1072,6 +1138,9 @@ public partial class TaskbarWidgetControl : UserControl
         bool coverChanged = !ReferenceEquals(SongImage.ImageSource, icon);
         if (coverChanged)
         {
+            _coverFadeTimer?.Stop();
+            _coverFadeTimer = null;
+
             SongImageFadeBrush.ImageSource = icon;
             SongImageFade.BeginAnimation(OpacityProperty, null);
             SongImageFade.Opacity = 0;
@@ -1082,11 +1151,14 @@ public partial class TaskbarWidgetControl : UserControl
             commit.Tick += (_, _) =>
             {
                 commit.Stop();
+                if (ReferenceEquals(_coverFadeTimer, commit))
+                    _coverFadeTimer = null;
                 SongImage.ImageSource = icon;
                 SongImageFadeBrush.ImageSource = null;
                 SongImageFade.BeginAnimation(OpacityProperty, null);
                 SongImageFade.Opacity = 0;
             };
+            _coverFadeTimer = commit;
             commit.Start();
         }
     }
@@ -1172,7 +1244,14 @@ public partial class TaskbarWidgetControl : UserControl
     {
         if (_mainWindow == null) return;
 
-        _ = _mainWindow.TryOpenMediaPlayerAsync();
+        try
+        {
+            await _mainWindow.TryOpenMediaPlayerAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn(ex, "Failed to open media player from taskbar context menu");
+        }
     }
 
     private void ContextMenuSettings_Click(object sender, RoutedEventArgs e)

@@ -71,11 +71,11 @@ internal static class Notifications
             {
                 // updated app version
                 new ToastContentBuilder()
-                    .AddText(Application.Current.FindResource("UpdateToastTitle").ToString())
-                    .AddText(string.Format(Application.Current.FindResource("UpdateToastMessage").ToString(), currentVersion))
+                    .AddText(Application.Current?.TryFindResource("UpdateToastTitle")?.ToString() ?? "FluentFlyout Updated")
+                    .AddText(string.Format(Application.Current?.TryFindResource("UpdateToastMessage")?.ToString() ?? "Updated to {0}", currentVersion))
                     .AddArgument("action", "viewChanges")
                     .AddButton(new ToastButton()
-                        .SetContent(Application.Current.FindResource("UpdateToastButton").ToString())
+                        .SetContent(Application.Current?.TryFindResource("UpdateToastButton")?.ToString() ?? "View Changelog")
                         .AddArgument("action", "viewChanges")
                         .SetBackgroundActivation())
                     .Show();
@@ -111,15 +111,15 @@ internal static class Notifications
         try
         {
             var builder = new ToastContentBuilder()
-                .AddText(Application.Current.FindResource("UpdateAvailableNotificationTitle").ToString())
-                .AddText(string.Format(Application.Current.FindResource("UpdateAvailableNotificationMessage").ToString(), newVersion))
+                .AddText(Application.Current?.TryFindResource("UpdateAvailableNotificationTitle")?.ToString() ?? "Update Available!")
+                .AddText(string.Format(Application.Current?.TryFindResource("UpdateAvailableNotificationMessage")?.ToString() ?? "Version {0} is available", newVersion))
                 .AddArgument("action", "downloadUpdate");
 
             // only add download button if URL is available
             if (!string.IsNullOrEmpty(updateUrl))
             {
                 builder.AddButton(new ToastButton()
-                    .SetContent(Application.Current.FindResource("UpdateAvailableNotificationButton").ToString())
+                    .SetContent(Application.Current?.TryFindResource("UpdateAvailableNotificationButton")?.ToString() ?? "Download Update")
                     .AddArgument("action", "downloadUpdate")
                     .AddArgument("url", updateUrl)
                     .SetBackgroundActivation());
@@ -139,13 +139,20 @@ internal static class Notifications
 
     public static void OpenUrlInBrowser(string url)
     {
-        if (string.IsNullOrEmpty(url)) return;
+        if (string.IsNullOrWhiteSpace(url)) return;
+
+        if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? uri) ||
+            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            Logger.Warn($"Blocked opening non-HTTP(S) URL in browser: {url}");
+            return;
+        }
 
         try
         {
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
-                FileName = url,
+                FileName = uri.AbsoluteUri,
                 UseShellExecute = true
             });
         }

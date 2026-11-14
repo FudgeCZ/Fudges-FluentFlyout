@@ -56,7 +56,7 @@ public static class UpdateCheckerService
         try
         {
             var response = await _http.GetStringAsync(ReleasesApiUrl);
-            var json = JsonDocument.Parse(response);
+            using var json = JsonDocument.Parse(response);
 
             result.NewestVersion = json.RootElement.GetProperty("tag_name").GetString() ?? string.Empty;
             result.UpdateUrl = json.RootElement.GetProperty("html_url").GetString() ?? string.Empty;
@@ -127,14 +127,89 @@ public static class UpdateCheckerService
     {
         try
         {
-            var current = Version.Parse(currentVersion.TrimStart('v'));
-            var newest = Version.Parse(newestVersion.TrimStart('v'));
-            return newest > current;
+            if (!TryParseSemVer(currentVersion, out var current, out var currentPre) ||
+                !TryParseSemVer(newestVersion, out var newest, out var newestPre))
+            {
+                Logger.Warn($"Failed to parse versions for comparison: {currentVersion} vs {newestVersion}");
+                return false;
+            }
+
+            int versionComparison = newest.CompareTo(current);
+            if (versionComparison != 0)
+            {
+                return versionComparison > 0;
+            }
+
+            // Equal core versions: stable release (empty pre-release) is newer than a pre-release.
+            if (string.IsNullOrEmpty(newestPre) && !string.IsNullOrEmpty(currentPre))
+                return true;
+            if (!string.IsNullOrEmpty(newestPre) && string.IsNullOrEmpty(currentPre))
+                return false;
+
+            return ComparePreRelease(newestPre, currentPre) > 0;
         }
         catch (Exception ex)
         {
             Logger.Error(ex, $"Failed to compare versions: {currentVersion} vs {newestVersion}");
             return false;
         }
+    }
+
+    private static bool TryParseSemVer(string rawVersion, out Version version, out string preRelease)
+    {
+        version = new Version(0, 0);
+        preRelease = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(rawVersion))
+            return false;
+
+        string trimmed = rawVersion.Trim().TrimStart('v', 'V');
+        int buildMetaIdx = trimmed.IndexOf('+');
+        if (buildMetaIdx >= 0)
+            trimmed = trimmed[..buildMetaIdx];
+
+        int preIdx = trimmed.IndexOf('-');
+        string core = preIdx >= 0 ? trimmed[..preIdx] : trimmed;
+        preRelease = preIdx >= 0 ? trimmed[(preIdx + 1)..] : string.Empty;
+
+        if (!Version.TryParse(core, out var parsed) || parsed == null)
+            return false;
+
+        // Normalize 2/3/4 components so 1.2 compares equal to 1.2.0.0.
+        version = new Version(
+            parsed.Major,
+            parsed.Minor,
+            parsed.Build < 0 ? 0 : parsed.Build,
+            parsed.Revision < 0 ? 0 : parsed.Revision);
+        return true;
+    }
+
+    private static int ComparePreRelease(string left, string right)
+    {
+        if (string.Equals(left, right, StringComparison.OrdinalIgnoreCase))
+            return 0;
+
+        var leftParts = left.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        var rightParts = right.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        int count = Math.Min(leftParts.Length, rightParts.Length);
+
+        for (int i = 0; i < count; i++)
+        {
+            bool leftIsNum = int.TryParse(leftParts[i], out int leftNum);
+            bool rightIsNum = int.TryParse(rightParts[i], out int rightNum);
+
+            int cmp = (leftIsNum, rightIsNum) switch
+            {
+                (true, true) => leftNum.CompareTo(rightNum),
+                (true, false) => -1,
+                (false, true) => 1,
+                _ => string.Compare(leftParts[i], rightParts[i], StringComparison.OrdinalIgnoreCase)
+            };
+
+            if (cmp != 0)
+                return cmp;
+        }
+
+        return leftParts.Length.CompareTo(rightParts.Length);
     }
 }

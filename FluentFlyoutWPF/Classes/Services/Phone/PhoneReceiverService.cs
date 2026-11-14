@@ -24,6 +24,7 @@ public sealed class PhoneReceiverService : IDisposable
 
     public static PhoneReceiverService Instance { get; } = new();
 
+    private readonly Lock _stateLock = new();
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
     private TcpClient? _client;
@@ -71,7 +72,10 @@ public sealed class PhoneReceiverService : IDisposable
         _retryTimer = new System.Timers.Timer(30000) { AutoReset = true };
         _retryTimer.Elapsed += (_, _) =>
         {
-            if (_started && _listener == null) StartListener();
+            lock (_stateLock)
+            {
+                if (!_disposed && _started && _listener == null) StartListenerLocked();
+            }
         };
 
         _applyDebounce = new System.Timers.Timer(500) { AutoReset = false };
@@ -81,9 +85,12 @@ public sealed class PhoneReceiverService : IDisposable
     /// <summary>Apply current UserSettings. Debounced so slider/typing changes don't thrash.</summary>
     public void ApplyFromSettings()
     {
-        if (_disposed) return;
-        _applyDebounce.Stop();
-        _applyDebounce.Start();
+        lock (_stateLock)
+        {
+            if (_disposed) return;
+            _applyDebounce.Stop();
+            _applyDebounce.Start();
+        }
     }
 
     private void ApplyNow()
@@ -94,82 +101,112 @@ public sealed class PhoneReceiverService : IDisposable
         bool discovery = settings.PhoneReceiverDiscovery;
         bool mix = settings.PhoneReceiverVbCableMix;
 
-        if (!want)
+        lock (_stateLock)
         {
-            if (_started) Shutdown();
-            return;
+            if (_disposed) return;
+
+            if (!want)
+            {
+                if (_started) ShutdownLocked();
+                return;
+            }
+
+            if (_started && port == _port && discovery == _discoveryEnabled && mix == _mixEnabled)
+                return;   // already running as configured
+
+            ShutdownLocked();
+            _audio = new PhoneAudioPlayer();
+            _port = port;
+            _discoveryEnabled = discovery;
+            _mixEnabled = mix;
+            _discovery.TcpPort = _port;
+            StartListenerLocked();
+            if (discovery) _discovery.Start();
+            _smtc.Start();
+            _retryTimer.Start();
+            _started = true;
+            Logger.Info("Phone receiver started on tcp/{0} (discovery: {1}, VB-Cable mix: {2})",
+                port, discovery, mix);
         }
-
-        if (_started && port == _port && discovery == _discoveryEnabled && mix == _mixEnabled)
-            return;   // already running as configured
-
-        Shutdown();
-        _audio = new PhoneAudioPlayer();
-        _port = port;
-        _discoveryEnabled = discovery;
-        _mixEnabled = mix;
-        StartListener();
-        if (discovery) _discovery.Start();
-        _smtc.Start();
-        _retryTimer.Start();
-        _started = true;
-        Logger.Info("Phone receiver started on tcp/{0} (discovery: {1}, VB-Cable mix: {2})",
-            port, discovery, mix);
     }
 
-    private void StartListener()
+    private void StartListenerLocked()
     {
         try
         {
-            _cts = new CancellationTokenSource();
-            _listener = new TcpListener(IPAddress.Any, _port);
-            _listener.Start();
+            try { _listener?.Stop(); } catch { }
+            _listener = null;
+            try { _cts?.Cancel(); } catch { }
+            try { _cts?.Dispose(); } catch { }
+            _cts = null;
+
+            var cts = new CancellationTokenSource();
+            var listener = new TcpListener(IPAddress.Any, _port);
+            listener.Start();
+            _cts = cts;
+            _listener = listener;
             Logger.Info("Phone listener on tcp/{0}", _port);
-            _ = AcceptLoopAsync(_cts.Token);
+            _ = AcceptLoopAsync(listener, cts.Token);
         }
         catch (Exception ex)
         {
             Logger.Error(ex, "Phone listener failed on tcp/{0} — is another instance running?", _port);
+            try { _cts?.Dispose(); } catch { }
+            _cts = null;
             _listener = null;
         }
     }
 
-    private void Shutdown()
+    private void ShutdownLocked()
     {
+        bool wasStarted = _started;
         _retryTimer.Stop();
         _interpTimer.Stop();
         _discovery.Stop();
-        try { _listener?.Stop(); _cts?.Cancel(); } catch { }
+        try { _listener?.Stop(); } catch { }
         _listener = null;
-        CloseClient();
-        OnDisconnected();
+        try { _cts?.Cancel(); } catch { }
+        try { _cts?.Dispose(); } catch { }
+        _cts = null;
+        CloseClientLocked();
+        OnDisconnectedLocked();
         _smtc.Stop();
         _audio.Dispose();
-        _mic?.Dispose(); _mic = null;
+        _mic?.Dispose();
+        _mic = null;
         _started = false;
-        Logger.Info("Phone receiver stopped");
+        if (wasStarted)
+            Logger.Info("Phone receiver stopped");
     }
 
     // ---- TCP -------------------------------------------------------------
 
-    private async Task AcceptLoopAsync(CancellationToken ct)
+    private async Task AcceptLoopAsync(TcpListener listener, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
             TcpClient client;
-            try { client = await _listener!.AcceptTcpClientAsync(ct); }
+            try { client = await listener.AcceptTcpClientAsync(ct).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
             catch (Exception ex) { Logger.Debug(ex, "Phone accept ended"); break; }
 
-            Logger.Info("Phone connected from {0}", client.Client.RemoteEndPoint);
-            CloseClient();
-            _client = client;
-            client.NoDelay = true;
-            _ = ClientLoopAsync(client, ct);
+            lock (_stateLock)
+            {
+                if (ct.IsCancellationRequested || _disposed || !ReferenceEquals(_listener, listener))
+                {
+                    try { client.Dispose(); } catch { }
+                    break;
+                }
+                Logger.Info("Phone connected from {0}", client.Client.RemoteEndPoint);
+                CloseClientLocked();
+                _client = client;
+                client.NoDelay = true;
+                _ = ClientLoopAsync(client, ct);
+            }
         }
     }
 
-    private void CloseClient()
+    private void CloseClientLocked()
     {
         var old = _client;
         _client = null;
@@ -184,7 +221,7 @@ public sealed class PhoneReceiverService : IDisposable
             using NetworkStream stream = client.GetStream();
             while (!ct.IsCancellationRequested && client.Connected)
             {
-                var (type, payload) = await PhoneFrameProtocol.ReadFrameAsync(stream, ct);
+                var (type, payload) = await PhoneFrameProtocol.ReadFrameAsync(stream, ct).ConfigureAwait(false);
                 switch (type)
                 {
                     case PhoneFrameProtocol.TypeJson: HandleJson(Encoding.UTF8.GetString(payload)); break;
@@ -196,22 +233,28 @@ public sealed class PhoneReceiverService : IDisposable
         catch (OperationCanceledException) { }
         catch (Exception ex) { Logger.Debug(ex, "Phone read loop ended"); }
 
-        if (ReferenceEquals(_client, client))
+        lock (_stateLock)
         {
-            Logger.Info("Phone disconnected");
-            CloseClient();
-            OnDisconnected();
+            if (ReferenceEquals(_client, client))
+            {
+                Logger.Info("Phone disconnected");
+                CloseClientLocked();
+                OnDisconnectedLocked();
+            }
         }
     }
 
-    private void OnDisconnected()
+    private void OnDisconnectedLocked()
     {
+        _interpTimer.Stop();
         _audio.Reset();
-        _mic?.ResetMusic();
+        _mic?.Dispose();
+        _mic = null;
         _playing = false;
         _trackId = null;
         _title = _artist = _album = null;
         _cover = null;
+        _awaitingCoverId = null;
         _positionMs = _durationMs = 0;
         // fully remove the session so the system media list can't keep a ghost
         // entry (a merely Closed session lingers and freezes the widget)
@@ -222,19 +265,36 @@ public sealed class PhoneReceiverService : IDisposable
 
     private void HandleAudio(byte[] pcm)
     {
-        _audio.AddSamples(pcm);
-        _mic?.AddMusic(pcm);
+        PhoneAudioPlayer audio;
+        PhoneMicMixService? mic;
+        lock (_stateLock)
+        {
+            if (_disposed) return;
+            audio = _audio;
+            mic = _mic;
+        }
+        audio.AddSamples(pcm);
+        mic?.AddMusic(pcm);
     }
 
     private void HandleCover(byte[] jpeg)
     {
-        if (_awaitingCoverId == null) return;
-        if (_trackId == _awaitingCoverId)
+        string? title, artist, album;
+        byte[] cover;
+        lock (_stateLock)
         {
+            if (_disposed || _awaitingCoverId == null) return;
+            bool match = _trackId == _awaitingCoverId;
+            _awaitingCoverId = null;
+            if (!match) return;
+
             _cover = jpeg;
-            _ = _smtc.UpdateMetadataAsync(_title, _artist, _album, _cover);
+            title = _title;
+            artist = _artist;
+            album = _album;
+            cover = _cover;
         }
-        _awaitingCoverId = null;
+        _ = _smtc.UpdateMetadataAsync(title, artist, album, cover);
     }
 
     private void HandleJson(string json)
@@ -246,17 +306,29 @@ public sealed class PhoneReceiverService : IDisposable
             switch (JStr(root, "t"))
             {
                 case "hello":
-                    _device = JStr(root, "device");
                     int rate = (int)(JNum(root, "sampleRate") ?? 48000);
                     int ch = (int)(JNum(root, "channels") ?? 2);
-                    _audio.Init(rate, ch);
-                    _musicFormat = new WaveFormat(rate, 16, ch);
-                    if (_mixEnabled && _musicFormat != null)
+                    if (rate is <= 0 or > 384000 || ch is <= 0 or > 8)
                     {
-                        _mic = new PhoneMicMixService();
-                        _mic.Start(_musicFormat);
+                        Logger.Warn("Ignoring phone hello with invalid audio format: {0} Hz, {1} ch", rate, ch);
+                        break;
                     }
-                    _smtc.Start();
+
+                    lock (_stateLock)
+                    {
+                        if (_disposed) break;
+                        _device = JStr(root, "device");
+                        _audio.Init(rate, ch);
+                        _musicFormat = new WaveFormat(rate, 16, ch);
+                        _mic?.Dispose();
+                        _mic = null;
+                        if (_mixEnabled && _musicFormat != null)
+                        {
+                            _mic = new PhoneMicMixService();
+                            _mic.Start(_musicFormat);
+                        }
+                        _smtc.Start();
+                    }
                     break;
 
                 case "meta": HandleMeta(root); break;
@@ -271,54 +343,76 @@ public sealed class PhoneReceiverService : IDisposable
 
     private void HandleMeta(JsonElement root)
     {
-        string? id = JStr(root, "id");
-        bool playing = JBool(root, "playing") ?? _playing;
-        double position = JNum(root, "position") ?? _positionMs;
+        string? title, artist, album;
+        byte[]? cover;
+        bool playing;
+        double positionMs, durationMs;
+        double? shuffle = JNum(root, "shuffle");
+        double? repeat = JNum(root, "repeat");
 
-        // flush stale audio on playing/pause/seek/skip transitions (state flip or a
-        // position jump far from our interpolated value)
-        double interpolated = _positionMs + (_playing ? (DateTime.UtcNow - _positionAt).TotalMilliseconds : 0);
-        if (_playing != playing || Math.Abs(position - interpolated) > 1500)
+        lock (_stateLock)
         {
-            _audio.Reset();
-            _mic?.ResetMusic();
+            if (_disposed) return;
+            string? id = JStr(root, "id");
+            playing = JBool(root, "playing") ?? _playing;
+            double position = JNum(root, "position") ?? _positionMs;
+
+            // flush stale audio on playing/pause/seek/skip transitions (state flip or a
+            // position jump far from our interpolated value)
+            double interpolated = _positionMs + (_playing ? (DateTime.UtcNow - _positionAt).TotalMilliseconds : 0);
+            if (_playing != playing || Math.Abs(position - interpolated) > 1500)
+            {
+                _audio.Reset();
+                _mic?.ResetMusic();
+            }
+
+            bool trackChanged = _trackId != id;
+            _trackId = id;
+            _title = JStr(root, "title") ?? _title;
+            _artist = JStr(root, "artist") ?? _artist;
+            _album = JStr(root, "album") ?? _album;
+            _durationMs = JNum(root, "duration") ?? _durationMs;
+            _positionMs = position;
+            _positionAt = DateTime.UtcNow;
+            _playing = playing;
+
+            if (trackChanged) _cover = null;                       // fresh cover frame follows if any
+            if (JBool(root, "cover") == true && id != null) _awaitingCoverId = id;
+
+            title = _title;
+            artist = _artist;
+            album = _album;
+            cover = _cover;
+            positionMs = _positionMs;
+            durationMs = _durationMs;
+
+            if (!_interpTimer.Enabled && _playing) _interpTimer.Start();
+            else if (_interpTimer.Enabled && !_playing) _interpTimer.Stop();
         }
 
-        bool trackChanged = _trackId != id;
-        _trackId = id;
-        _title = JStr(root, "title") ?? _title;
-        _artist = JStr(root, "artist") ?? _artist;
-        _album = JStr(root, "album") ?? _album;
-        _durationMs = JNum(root, "duration") ?? _durationMs;
-        _positionMs = position;
-        _positionAt = DateTime.UtcNow;
-        _playing = playing;
-
-        if (trackChanged) _cover = null;                       // fresh cover frame follows if any
-        if (JBool(root, "cover") == true && id != null) _awaitingCoverId = id;
-
         // reflect the phone's shuffle/repeat state in the system session
-        var shuffle = JNum(root, "shuffle");
-        var repeat = JNum(root, "repeat");
         if (shuffle.HasValue || repeat.HasValue)
             _smtc.UpdateShuffleRepeat(shuffle.HasValue ? shuffle.Value == 1 : null,
                 repeat.HasValue ? (int)repeat.Value : null);
 
-        _ = _smtc.UpdateMetadataAsync(_title, _artist, _album, _cover);
-        _smtc.UpdateStatus(_playing);
-        _smtc.UpdateTimeline(_positionMs, _durationMs);
-
-        if (!_interpTimer.Enabled && _playing) _interpTimer.Start();
-        else if (_interpTimer.Enabled && !_playing) _interpTimer.Stop();
+        _ = _smtc.UpdateMetadataAsync(title, artist, album, cover);
+        _smtc.UpdateStatus(playing);
+        _smtc.UpdateTimeline(positionMs, durationMs);
     }
 
     private void InterpTick()
     {
-        if (!_playing) return;
-        _positionMs += (DateTime.UtcNow - _positionAt).TotalMilliseconds;
-        _positionAt = DateTime.UtcNow;
-        if (_durationMs > 0) _positionMs = Math.Min(_positionMs, _durationMs);
-        _smtc.UpdateTimeline(_positionMs, _durationMs);
+        double positionMs, durationMs;
+        lock (_stateLock)
+        {
+            if (_disposed || !_playing) return;
+            _positionMs += (DateTime.UtcNow - _positionAt).TotalMilliseconds;
+            _positionAt = DateTime.UtcNow;
+            if (_durationMs > 0) _positionMs = Math.Min(_positionMs, _durationMs);
+            positionMs = _positionMs;
+            durationMs = _durationMs;
+        }
+        _smtc.UpdateTimeline(positionMs, durationMs);
     }
 
     // ---- commands (system transport → phone) --------------------------------
@@ -337,19 +431,37 @@ public sealed class PhoneReceiverService : IDisposable
 
     private void SendCommand(object payload)
     {
-        var client = _client;
+        TcpClient? client;
+        lock (_stateLock)
+        {
+            if (_disposed) return;
+            client = _client;
+        }
         if (client == null) return;
         _ = Task.Run(async () =>
         {
             try
             {
-                await _sendLock.WaitAsync();
+                await _sendLock.WaitAsync().ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+
+            try
+            {
+                if (_disposed || !ReferenceEquals(_client, client) || !client.Connected)
+                    return;
                 var stream = client.GetStream();
                 await PhoneFrameProtocol.WriteFrameAsync(stream, PhoneFrameProtocol.TypeJson,
-                    Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload)), CancellationToken.None);
+                    Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload)), CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception ex) { Logger.Debug(ex, "Phone command send failed"); }
-            finally { _sendLock.Release(); }
+            finally
+            {
+                try { _sendLock.Release(); } catch (ObjectDisposedException) { }
+            }
         });
     }
 
@@ -367,12 +479,18 @@ public sealed class PhoneReceiverService : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        _applyDebounce.Stop();
-        if (_started) Shutdown();
-        _interpTimer.Dispose();
-        _retryTimer.Dispose();
-        _applyDebounce.Dispose();
+        lock (_stateLock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _applyDebounce.Stop();
+            ShutdownLocked();
+            _interpTimer.Dispose();
+            _retryTimer.Dispose();
+            _applyDebounce.Dispose();
+            _discovery.Dispose();
+            _smtc.Dispose();
+            _sendLock.Dispose();
+        }
     }
 }

@@ -20,8 +20,8 @@
         xmlns:viewModels="clr-namespace:FluentFlyoutWPF.ViewModels"
 		d:DataContext="{d:DesignInstance viewModels:UserSettings}">
     <Canvas Name="WidgetCanvas" Background="Transparent">
-		<controls:TaskbarVisualizerControl x:Name="TaskbarVisualizer" Margin="0,1,0,0" />
-        <controls:TaskbarLyricsControl x:Name="Lyrics" Margin="0,1,0,0" />
+		<controls:TaskbarVisualizerControl x:Name="TaskbarVisualizer" />
+        <controls:TaskbarLyricsControl x:Name="Lyrics" />
         <controls:TaskbarWidgetControl x:Name="Widget" />
     </Canvas>
 </Window>

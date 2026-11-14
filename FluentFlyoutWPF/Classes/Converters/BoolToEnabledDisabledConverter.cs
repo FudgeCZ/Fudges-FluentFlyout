@@ -18,7 +18,7 @@ public class BoolToEnabledDisabledConverter : IValueConverter
 
             var resourceKey = boolValue ? enabledKey : disabledKey;
 
-            if (Application.Current.TryFindResource(resourceKey) is string localizedString)
+            if (Application.Current?.TryFindResource(resourceKey) is string localizedString)
             {
                 return localizedString;
             }

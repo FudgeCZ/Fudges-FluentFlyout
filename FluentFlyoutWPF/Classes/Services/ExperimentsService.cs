@@ -14,6 +14,7 @@ internal class ExperimentsService
     private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
     private const string ApiEndpoint = "experiments";
 
+    private static readonly Lock _experimentsLock = new();
     private static List<Experiment> _experiments = new();
     private static bool _hasExperiments = false;
 
@@ -41,9 +42,27 @@ internal class ExperimentsService
         public string? ForceVariant { get; set; }
     }
 
-    public static List<Experiment> GetExperiments => _experiments;
+    public static List<Experiment> GetExperiments
+    {
+        get
+        {
+            lock (_experimentsLock)
+            {
+                return [.. _experiments];
+            }
+        }
+    }
 
-    public static bool HasExperiments => _hasExperiments;
+    public static bool HasExperiments
+    {
+        get
+        {
+            lock (_experimentsLock)
+            {
+                return _hasExperiments;
+            }
+        }
+    }
 
     public static async Task<ExperimentsResult> GetExperimentsAsync()
     {
@@ -85,8 +104,11 @@ internal class ExperimentsService
             result.Success = false;
         }
 
-        _experiments = result.Experiments;
-        _hasExperiments = result.Experiments.Count > 0;
+        lock (_experimentsLock)
+        {
+            _experiments = result.Experiments;
+            _hasExperiments = result.Experiments.Count > 0;
+        }
 
         return result;
     }
@@ -94,7 +116,15 @@ internal class ExperimentsService
     // returns variantName
     public static string CheckUuidInExperiment(string experimentName)
     {
-        var experiment = _experiments.FirstOrDefault(e => e.Name.Equals(experimentName, StringComparison.OrdinalIgnoreCase));
+        if (string.IsNullOrEmpty(experimentName))
+            return string.Empty;
+
+        Experiment? experiment;
+        lock (_experimentsLock)
+        {
+            experiment = _experiments.FirstOrDefault(e => e.Name.Equals(experimentName, StringComparison.OrdinalIgnoreCase));
+        }
+
         Guid uuid = SettingsManager.Current.Uuid;
 
         if (experiment == null)
@@ -108,15 +138,25 @@ internal class ExperimentsService
             return !string.IsNullOrEmpty(experiment.ForceVariant) ? experiment.ForceVariant : string.Empty;
         }
 
+        double totalWeight = experiment.Variants.Values.Where(w => w > 0).Sum();
+        if (totalWeight <= 0)
+        {
+            Logger.Debug($"Experiment '{experimentName}' has no positive variant weights.");
+            return string.Empty;
+        }
+
         // Calculate a hash of the UUID to determine the variant
         byte[] hashBytes = MD5.HashData(uuid.ToByteArray());
         uint hash = BitConverter.ToUInt32(hashBytes, 0);
-        double totalWeight = experiment.Variants.Values.Sum();
+        double roll = (hash / ((double)uint.MaxValue + 1.0)) * totalWeight;
         double cumulativeWeight = 0;
         foreach (var variant in experiment.Variants)
         {
+            if (variant.Value <= 0)
+                continue;
+
             cumulativeWeight += variant.Value;
-            if ((hash % totalWeight) < cumulativeWeight)
+            if (roll < cumulativeWeight)
             {
                 Logger.Debug($"UUID '{uuid}' is assigned to variant '{variant.Key}' of experiment '{experimentName}'.");
                 return variant.Key; // UUID is in the experiment

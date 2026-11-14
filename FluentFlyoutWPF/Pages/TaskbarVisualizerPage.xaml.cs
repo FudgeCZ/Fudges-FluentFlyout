@@ -18,7 +18,6 @@ public partial class TaskbarVisualizerPage : Page
         DataContext = SettingsManager.Current;
         Loaded += (_, _) =>
         {
-            TaskbarVisualizerMonitorSelector.RenderMonitors();
             RefreshTargetItems();
         };
     }
@@ -38,23 +37,30 @@ public partial class TaskbarVisualizerPage : Page
     {
         var items = new List<string> { "Whole system" };
 
-        var mainWindow = Application.Current.MainWindow as MainWindow;
+        var mainWindow = Application.Current?.MainWindow as MainWindow;
         if (mainWindow?.mediaManager != null)
         {
             items.AddRange(mainWindow.mediaManager.CurrentMediaSessions.Values
                 .Select(s => MediaPlayerData.GetAndCacheMediaPlayerData(s.Id).Item1)
                 .Where(n => !string.IsNullOrWhiteSpace(n))
-                .Distinct()
-                .OrderBy(n => n));
+                .Distinct(System.StringComparer.OrdinalIgnoreCase)
+                .OrderBy(n => n, System.StringComparer.OrdinalIgnoreCase));
         }
 
         var current = SettingsManager.Current.TaskbarVisualizerTargetApp;
-        if (!string.IsNullOrWhiteSpace(current) && !items.Contains(current, System.StringComparer.OrdinalIgnoreCase))
+        var matchedCurrent = string.IsNullOrWhiteSpace(current)
+            ? "Whole system"
+            : items.FirstOrDefault(item => string.Equals(item, current, System.StringComparison.OrdinalIgnoreCase));
+
+        if (!string.IsNullOrWhiteSpace(current) && matchedCurrent == null)
+        {
             items.Insert(1, current);
+            matchedCurrent = current;
+        }
 
         TargetAppComboBox.SelectedItem = null;
         TargetAppComboBox.ItemsSource = items;
-        TargetAppComboBox.SelectedItem = string.IsNullOrWhiteSpace(current) ? "Whole system" : current;
+        TargetAppComboBox.SelectedItem = matchedCurrent;
     }
 
     private void TargetAppComboBox_DropDownOpened(object sender, EventArgs e)

@@ -24,7 +24,7 @@ public partial class AppFilteringPage : Page
     private static void SaveAndRefreshMedia()
     {
         SettingsManager.SaveSettings();
-        var mainWindow = Application.Current.MainWindow as MainWindow;
+        var mainWindow = Application.Current?.MainWindow as MainWindow;
 
         mainWindow?.RefreshFilteredMedia();
     }
@@ -43,14 +43,13 @@ public partial class AppFilteringPage : Page
             app = app[..^4];
         }
 
-        var mainWindow = Application.Current.MainWindow as MainWindow;
+        var mainWindow = Application.Current?.MainWindow as MainWindow;
         if (mainWindow?.mediaManager == null) return app;
 
         var match = mainWindow.mediaManager.CurrentMediaSessions.Values
             .Select(s => MediaPlayerData.GetAndCacheMediaPlayerData(s.Id).Item1)
-            .FirstOrDefault(name => name.Equals(app, System.StringComparison.OrdinalIgnoreCase) ||
-                                    name.Contains(app, System.StringComparison.OrdinalIgnoreCase) ||
-                                    app.Contains(name, System.StringComparison.OrdinalIgnoreCase));
+            .FirstOrDefault(name => !string.IsNullOrWhiteSpace(name) &&
+                                    name.Equals(app, System.StringComparison.OrdinalIgnoreCase));
 
         return match ?? app;
     }
@@ -62,14 +61,15 @@ public partial class AppFilteringPage : Page
     /// <param name="comboBox">The ComboBox to populate with the list of applications. (Should not be null).</param>
     private static void PopulateComboBox(ComboBox comboBox)
     {
-        var mainWindow = Application.Current.MainWindow as MainWindow;
+        var mainWindow = Application.Current?.MainWindow as MainWindow;
 
         if (mainWindow?.mediaManager == null) return;
 
         var apps = mainWindow.mediaManager.CurrentMediaSessions.Values
             .Select(s => MediaPlayerData.GetAndCacheMediaPlayerData(s.Id).Item1)
-            .Distinct()
-            .OrderBy(a => a)
+            .Where(a => !string.IsNullOrWhiteSpace(a))
+            .Distinct(System.StringComparer.OrdinalIgnoreCase)
+            .OrderBy(a => a, System.StringComparer.OrdinalIgnoreCase)
             .ToList();
 
         comboBox.ItemsSource = apps;

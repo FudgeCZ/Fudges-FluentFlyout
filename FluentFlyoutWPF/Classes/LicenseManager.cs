@@ -33,6 +33,7 @@ public class LicenseManager
     private bool _isStoreVersion;
     private bool _isSubscriptionCohort;
     private bool _subscriptionTrialAvailable;
+    private readonly SemaphoreSlim _initSemaphore = new(1, 1);
 
     /// <summary>
     /// Gets the singleton instance of the LicenseManager
@@ -81,8 +82,12 @@ public class LicenseManager
         if (_isInitialized)
             return;
 
+        await _initSemaphore.WaitAsync();
         try
         {
+            if (_isInitialized)
+                return;
+
             Logger.Info("LicenseManager: Initializing");
 #if GITHUB_RELEASE
             _isStoreVersion = false;
@@ -93,7 +98,14 @@ public class LicenseManager
             // Get Store context
             _storeContext = StoreContext.GetDefault();
 
-            var interop = new WindowInteropHelper(Application.Current.MainWindow);
+            var mainWindow = Application.Current?.MainWindow;
+            if (mainWindow == null)
+            {
+                Logger.Warn("LicenseManager: MainWindow is null, deferring initialization");
+                return;
+            }
+
+            var interop = new WindowInteropHelper(mainWindow);
             IntPtr hwnd = interop.Handle;
             WinRT.Interop.InitializeWithWindow.Initialize(_storeContext, hwnd);
 
@@ -122,7 +134,10 @@ public class LicenseManager
         catch (Exception ex)
         {
             Logger.Error(ex, "Error initializing");
-            _isInitialized = true;
+        }
+        finally
+        {
+            _initSemaphore.Release();
         }
     }
 
@@ -338,7 +353,7 @@ public class LicenseManager
     {
         if (!_isSubscriptionCohort)
         {
-            SettingsManager.Current.PremiumPurchaseAction = Application.Current.TryFindResource("UnlockPremiumButton") as string ?? "Unlock Premium";
+            SettingsManager.Current.PremiumPurchaseAction = Application.Current?.TryFindResource("UnlockPremiumButton")?.ToString() ?? "Unlock Premium";
             SettingsManager.Current.PremiumPrice = price;
             return;
         }
@@ -373,7 +388,7 @@ public class LicenseManager
                 MessageBox messageBox = new()
                 {
                     Title = "Success",
-                    Content = Application.Current.TryFindResource("PremiumPurchaseSuccess").ToString(),
+                    Content = Application.Current?.TryFindResource("PremiumPurchaseSuccess")?.ToString() ?? "Premium unlocked!",
                     CloseButtonText = "OK",
                 };
 
@@ -381,10 +396,11 @@ public class LicenseManager
             }
             else
             {
+                var failedMessage = Application.Current?.TryFindResource("PremiumPurchaseFailed")?.ToString() ?? "Purchase failed";
                 MessageBox messageBox = new()
                 {
                     Title = "Purchase Failed",
-                    Content = $"{Application.Current.TryFindResource("PremiumPurchaseFailed")} ({result})",
+                    Content = $"{failedMessage} ({result})",
                     CloseButtonText = "OK",
                 };
 
@@ -393,14 +409,22 @@ public class LicenseManager
         }
         catch (Exception ex)
         {
-            MessageBox messageBox = new()
+            Logger.Error(ex, "Failed to unlock premium");
+            try
             {
-                Title = "Error",
-                Content = $"An error occurred: {ex.Message}",
-                CloseButtonText = "OK",
-            };
+                MessageBox messageBox = new()
+                {
+                    Title = "Error",
+                    Content = $"An error occurred: {ex.Message}",
+                    CloseButtonText = "OK",
+                };
 
-            await messageBox.ShowDialogAsync();
+                await messageBox.ShowDialogAsync();
+            }
+            catch (Exception dialogEx)
+            {
+                Logger.Error(dialogEx, "Failed to display purchase error dialog");
+            }
         }
         finally
         {

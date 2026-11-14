@@ -18,15 +18,20 @@ public static class TelemetryService
 
         try
         {
-            string appVersion = (SettingsManager.Current.LastKnownVersion ?? "unknown")
+            string version = string.IsNullOrWhiteSpace(SettingsManager.Current.LastKnownVersion)
+                ? "unknown"
+                : SettingsManager.Current.LastKnownVersion;
+            string appVersion = version
                 + "-"
                 + (SettingsManager.Current.IsStoreVersion ? "store" : "github");
+
+            string? normalizedExperimentId = string.IsNullOrWhiteSpace(experimentId) ? null : experimentId;
 
             var telemetryData = new
             {
                 eventName,
-                experimentId = experimentId ?? string.Empty,
-                variant = ExperimentsService.CheckUuidInExperiment(experimentId ?? string.Empty),
+                experimentId = normalizedExperimentId,
+                variant = normalizedExperimentId == null ? null : ExperimentsService.CheckUuidInExperiment(normalizedExperimentId),
                 userId = SettingsManager.Current.Uuid,
                 sessionId = SettingsManager.Current.SessionId,
                 appVersion,

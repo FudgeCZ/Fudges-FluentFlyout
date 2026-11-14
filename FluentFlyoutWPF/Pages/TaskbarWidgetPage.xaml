@@ -348,7 +348,7 @@
                         <TextBlock Text="Thin playback progress line at the bottom of the widget." FontSize="12" Opacity="0.5" />
                     </StackPanel>
                 </ui:CardControl.Header>
-                <ui:ToggleSwitch IsChecked="{Binding TaskbarWidgetProgressBarEnabled, Mode=TwoWay}" />
+                <ui:ToggleSwitch IsChecked="{Binding TaskbarWidgetProgressBarEnabled, Mode=TwoWay}" IsEnabled="{Binding IsPremiumUnlocked}" />
             </ui:CardControl>
         </StackPanel>
         <TextBlock Text="{DynamicResource RelatedSettingsTitle}" FontSize="14" FontWeight="SemiBold" Margin="0,12,0,6" />

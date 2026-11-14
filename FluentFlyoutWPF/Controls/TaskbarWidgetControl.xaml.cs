@@ -1011,8 +1011,17 @@ public partial class TaskbarWidgetControl : UserControl
             // tiny roll animation when the displayed minute flips over
             if (text != _lastTimeText && TimeTextRoll != null)
             {
-                string? minuteOf(string? t) => t is null || t.Length < 4 ? t : t[..^1]; // "0:48 / 3:20" → minute bucket
-                if (_lastTimeText != null && minuteOf(_lastTimeText) != minuteOf(text))
+                static string? MinuteOf(string? t)
+                {
+                    if (string.IsNullOrEmpty(t)) return t;
+                    int slash = t.IndexOf('/');
+                    string pos = slash >= 0 ? t[..slash].TrimEnd() : t;
+                    int colon = pos.LastIndexOf(':');
+                    return colon >= 0 ? pos[..colon] : pos;
+                }
+
+                if (!string.IsNullOrEmpty(_lastTimeText) && !string.IsNullOrEmpty(text)
+                    && MinuteOf(_lastTimeText) != MinuteOf(text))
                 {
                     TimeTextRoll.BeginAnimation(TranslateTransform.YProperty,
                         new DoubleAnimation(5, 0, TimeSpan.FromMilliseconds(160)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });

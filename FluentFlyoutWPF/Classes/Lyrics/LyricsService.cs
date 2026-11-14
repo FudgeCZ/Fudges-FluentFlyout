@@ -1060,7 +1060,7 @@ public sealed class LyricsService
     // --- per-track disabled lyrics memory ---
 
     private static string DisabledPath => Path.Combine(CacheDir, "disabled.json");
-    private readonly HashSet<string> _disabledTracks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTimeOffset> _disabledTracks = new(StringComparer.OrdinalIgnoreCase);
     private bool _disabledLoaded;
     private readonly object _disabledLock = new();
 
@@ -1073,11 +1073,19 @@ public sealed class LyricsService
         if (string.IsNullOrWhiteSpace(artist) && string.IsNullOrWhiteSpace(title))
             return false;
 
+        bool pruned;
+        bool isDisabled;
         lock (_disabledLock)
         {
             EnsureDisabledLoaded();
-            return _disabledTracks.Contains(MakeTrackId(artist, title));
+            pruned = PruneExpiredDisabledLocked();
+            isDisabled = _disabledTracks.ContainsKey(MakeTrackId(artist, title));
         }
+
+        if (pruned)
+            NotifyDisabledChanged();
+
+        return isDisabled;
     }
 
     /// <summary>Total number of tracks with lyrics disabled.</summary>
@@ -1085,11 +1093,19 @@ public sealed class LyricsService
     {
         get
         {
+            bool pruned;
+            int count;
             lock (_disabledLock)
             {
                 EnsureDisabledLoaded();
-                return _disabledTracks.Count;
+                pruned = PruneExpiredDisabledLocked();
+                count = _disabledTracks.Count;
             }
+
+            if (pruned)
+                NotifyDisabledChanged();
+
+            return count;
         }
     }
 
@@ -1101,16 +1117,31 @@ public sealed class LyricsService
 
         string id = MakeTrackId(artist, title);
         bool changed;
+        bool pruned;
         lock (_disabledLock)
         {
             EnsureDisabledLoaded();
-            changed = disabled ? _disabledTracks.Add(id) : _disabledTracks.Remove(id);
-            if (changed)
+            pruned = PruneExpiredDisabledLocked();
+            if (disabled)
+            {
+                changed = !_disabledTracks.ContainsKey(id);
+                _disabledTracks[id] = DateTimeOffset.UtcNow;
                 SaveDisabledLocked();
+            }
+            else
+            {
+                changed = _disabledTracks.Remove(id);
+                if (changed)
+                    SaveDisabledLocked();
+            }
         }
 
         if (!changed)
+        {
+            if (pruned)
+                NotifyDisabledChanged();
             return;
+        }
 
         bool matchesCurrent = false;
         lock (_stateLock)
@@ -1171,13 +1202,56 @@ public sealed class LyricsService
         NotifyDisabledChanged();
     }
 
+    /// <summary>Removes expired entries from the disabled lyrics list according to user settings.</summary>
+    public void PruneExpiredDisabledTracks()
+    {
+        bool pruned;
+        lock (_disabledLock)
+        {
+            EnsureDisabledLoaded();
+            pruned = PruneExpiredDisabledLocked();
+        }
+
+        if (pruned)
+            NotifyDisabledChanged();
+    }
+
+    private bool PruneExpiredDisabledLocked()
+    {
+        int expireDays = FluentFlyout.Classes.Settings.SettingsManager.Current.DisabledLyricsExpireDays;
+        if (expireDays <= 0 || _disabledTracks.Count == 0)
+            return false;
+
+        DateTimeOffset cutoff = DateTimeOffset.UtcNow.AddDays(-expireDays);
+        List<string>? expiredKeys = null;
+        foreach (var kv in _disabledTracks)
+        {
+            if (kv.Value <= cutoff)
+            {
+                expiredKeys ??= [];
+                expiredKeys.Add(kv.Key);
+            }
+        }
+
+        if (expiredKeys == null)
+            return false;
+
+        foreach (string key in expiredKeys)
+            _disabledTracks.Remove(key);
+
+        SaveDisabledLocked();
+        return true;
+    }
+
     private void SaveDisabledLocked()
     {
         try
         {
             Directory.CreateDirectory(CacheDir);
-            File.WriteAllText(DisabledPath,
-                JsonSerializer.Serialize(_disabledTracks.OrderBy(x => x, StringComparer.Ordinal).ToList(), JsonOptions));
+            var ordered = _disabledTracks
+                .OrderBy(x => x.Key, StringComparer.Ordinal)
+                .ToDictionary(x => x.Key, x => x.Value);
+            File.WriteAllText(DisabledPath, JsonSerializer.Serialize(ordered, JsonOptions));
         }
         catch (Exception ex)
         {
@@ -1194,11 +1268,37 @@ public sealed class LyricsService
         {
             if (File.Exists(DisabledPath))
             {
-                var data = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(DisabledPath), JsonOptions);
-                if (data != null)
-                    foreach (var item in data)
-                        if (!string.IsNullOrWhiteSpace(item))
-                            _disabledTracks.Add(item);
+                string json = File.ReadAllText(DisabledPath);
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var prop in doc.RootElement.EnumerateObject())
+                    {
+                        if (string.IsNullOrWhiteSpace(prop.Name))
+                            continue;
+                        DateTimeOffset ts = prop.Value.ValueKind == JsonValueKind.String
+                            && prop.Value.TryGetDateTimeOffset(out var parsed)
+                            ? parsed
+                            : DateTimeOffset.UtcNow;
+                        _disabledTracks[prop.Name] = ts;
+                    }
+                    PruneExpiredDisabledLocked();
+                }
+                else if (doc.RootElement.ValueKind == JsonValueKind.Array)
+                {
+                    DateTimeOffset now = DateTimeOffset.UtcNow;
+                    foreach (var elem in doc.RootElement.EnumerateArray())
+                    {
+                        if (elem.ValueKind == JsonValueKind.String)
+                        {
+                            string? item = elem.GetString();
+                            if (!string.IsNullOrWhiteSpace(item))
+                                _disabledTracks[item] = now;
+                        }
+                    }
+                    // Migrate legacy array format to timestamped dictionary
+                    SaveDisabledLocked();
+                }
             }
         }
         catch (Exception ex)

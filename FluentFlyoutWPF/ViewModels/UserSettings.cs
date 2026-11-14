@@ -748,6 +748,13 @@ public partial class UserSettings : ObservableObject
     public partial string LyricsYtmSession { get; set; }
 
     /// <summary>
+    /// Number of days after which a disabled-lyrics song automatically expires and is re-enabled.
+    /// 0 disables automatic expiration. Default is 7.
+    /// </summary>
+    [ObservableProperty]
+    public partial int DisabledLyricsExpireDays { get; set; }
+
+    /// <summary>
     /// Whether the visualizer should be symmetrical/mirrored.
     /// </summary>
     [ObservableProperty]
@@ -1112,6 +1119,7 @@ public partial class UserSettings : ObservableObject
         LyricsOffsetMs = 0;
         LyricsHidePausedAfterSeconds = 15;
         LyricsYtmSession = "";
+        DisabledLyricsExpireDays = 7;
         TaskbarWidgetProgressBarEnabled = true;
         TaskbarVisualizerBeatGlow = true;
         TaskbarVisualizerStyle = 0;
@@ -1587,6 +1595,17 @@ public partial class UserSettings : ObservableObject
         if (oldValue == newValue || _initializing || _switchingMonitorProfile) return;
         SyncActiveMonitorFromUserSettings();
         UpdateTaskbar();
+    }
+
+    partial void OnDisabledLyricsExpireDaysChanged(int oldValue, int newValue)
+    {
+        if (newValue < 0)
+        {
+            DisabledLyricsExpireDays = 0;
+            return;
+        }
+        if (oldValue == newValue || _initializing) return;
+        Classes.Lyrics.LyricsService.Instance.PruneExpiredDisabledTracks();
     }
 
     partial void OnMediaSessionPriorityAppChanged(string oldValue, string newValue)

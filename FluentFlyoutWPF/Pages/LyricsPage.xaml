@@ -112,6 +112,20 @@
             <Button x:Name="ResetDisabledSongsButton" Content="Reset" Click="ResetDisabledSongs_Click" />
         </ui:CardControl>
 
+        <ui:CardControl Icon="{ui:SymbolIcon Clock24}" Margin="0,0,0,3">
+            <ui:CardControl.Header>
+                <StackPanel Orientation="Vertical">
+                    <TextBlock Text="Auto-reset disabled songs (days)" FontSize="14" FontWeight="Regular" VerticalAlignment="Center" />
+                    <TextBlock Text="Automatically re-enable lyrics for a disabled song after this many days. 0 = never expire." FontSize="12" Opacity="0.5" />
+                </StackPanel>
+            </ui:CardControl.Header>
+            <StackPanel Orientation="Horizontal">
+                <Slider Minimum="0" Maximum="30" Value="{Binding DisabledLyricsExpireDays, Mode=TwoWay}" TickFrequency="1" IsSnapToTickEnabled="True" Width="150"
+                        IsMoveToPointEnabled="True" />
+                <ui:TextBlock Text="{Binding DisabledLyricsExpireDays}" Width="32" TextAlignment="Center" Margin="12,0,0,0" />
+            </StackPanel>
+        </ui:CardControl>
+
         <ui:CardControl Icon="{ui:SymbolIcon Delete24}" Margin="0,0,0,12">
             <ui:CardControl.Header>
                 <StackPanel Orientation="Vertical">
